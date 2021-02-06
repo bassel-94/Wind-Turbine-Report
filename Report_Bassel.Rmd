@@ -1,10 +1,213 @@
 ---
-title: "Report"
-author: "Bassel MASRI"
+title: | 
+  | \vspace{8cm} \textbf{Wind-Turbine predictive maintenance for TOTAL}
+  
+author:
+  - Bassel MASRI
+  - Guillaume FRANCHI
+
 date: "2/5/2021"
-output: pdf_document
+output:
+  pdf_document:
+    number_sections: true
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r}
+# for ggplot customizations 
+#           theme(axis.text.x = element_text(angle = 45, hjust = 0.6),
+#                 plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
+#                 legend.title = element_text(size = 8, face = "bold"),
+#                 legend.text = element_text(size = 6),
+#                 axis.text=element_text(size=6),
+#                 axis.title=element_text(size=8,face="bold"))
 ```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+\newpage
+\pagenumbering{arabic}
+\tableofcontents
+\newpage
+
+# Introduction
+
+Many government policies are researching sustainable energy production resources in order to reduce their carbon footprint. In particular, harvesting the wind's kinetic energy through wind turbines accounts for nearly 28% of all installed renewable power capacity [reference.1]. However, heavy machinery entails many engineering challenges like operation and maintenance. It is estimated that about 30% of the total generation costs is induced by maintenance downtime which made predictive maintenance a hot research topic for the last few years. Recent breakthroughs in connected sensors, robotics and internet of things (IoT) have allowed manufacturers to collect big amounts of data from different parts of the turbine through their SCADA (Supervisory Control and Data Acquisition) system in order to monitor its behavior. Recent advances in machine learning techniques and programming platforms have opened a door to analyzing such amounts of data in the aim of monitoring faulty behaviors in the form of anomaly detection and failure predictions which is the main focus of this project.
+
+The SCADA system collects information about electrical and mechanical components through temperature sensors. Throughout this study, we introduce and discuss potential ways to approach analyzing the SCADA data coupled with some external environmental factors such as the weather conditions. The goal of such study is to detect faulty behaviors of a wind turbine and, by extension, reducing its down time when performing maintenance tasks on its main components like the generator and the gearbox. 
+
+# Methodology
+
+## Data description
+
+This is Guillaume's part
+
+## Analysis steps
+
+This section covers the analysis steps that have been explored in order to model the normal behavior and identify abnormal behavior of wind turbines. The ultimate goal of this study is to predict a failure through data points that fall outside the envelop of a *normal* behavior of a turbine. The two main components that have been studied are the turbine's *generator* and *gearbox*, as their maintenance task results in the longest downtimes. Figure \ref{fig:work} illustrates the workflow that we have followed throughout this study.
+
+```{r work, out.width="35%", fig.cap="Workflow diagram of the study", fig.align='center'}
+knitr::include_graphics(rep('~/Smart Data project/Report/Wind-Turbine-Report/Figures/workflow.png'))
+```
+
+Our analysis begins with a classic exploratory data analysis approach where we investigate the nature of the variables throughout all two years of data and visally discern some important patterns. Such analysis is a crucial first step towards understanding the normal behavior of the turbines as well as understanding the abnormal behavior that triggered a failure. Since the manufacturers provide a datasheet describing the optimal functionning of a production curve, we use that as a basis in the next step which is data cleaning. 
+
+Data preprocessing and cleaning is carried through univariate and multivariate outlier detection via thresholding to approximate the shape of the ideal power curve. Once the data is cleaned, we select variables based on engineering knowledge and other related research work in order to lay the groundwork for the modeling step. We will discuss the target variable of each component as well as the predictors in later sections.
+
+The modeling process entails splitting the data in two parts; a modeling set which contains 18 months of data and a test set which contains the last 6 months of data. The modeling set is then split in two parts for training and evaluating the model according to a 80-20% ratio. Data shuffling is avoided to respect the time arrangmenet of the observations. Throughout the study, we apply all preprocessing techniques uniquely on the modeling set, leaving the test set unfiltered and unclean. Based on selected components and their corresponding predictors, we fit a tree-based extreme gradient boosting (XGBoost) model on the train set and evaluate its performance on the validation set. 
+
+We then define boundaries of the normal behavior of the turbine using the model's output and some thresholding. Finally, we predict new values for the test set using the model we trained to simulate normal behavior. By examining the difference between observed and predicted values for the test set (on which we do not apply any preprocessing), we examine the data points that fall outside of the normal behavior envelope so as to capture abnormal behavior that occured in the last 6 months of data. Figure \ref{fig:scat} illustrates an example of the normal behavior envelope and how it may help detect abnormal behavior if a data points falls outside its reach.
+
+```{r scat, out.width="35%", fig.cap="Demonstration of normal behavior boundaries and anomalies on the last 6 months of data", fig.align='center'}
+knitr::include_graphics(rep('~/Smart Data project/Report/Wind-Turbine-Report/Figures/boundaries.png'))
+```
+
+# Approach 
+
+In the following subsections, we will discuss in detail the approach that we followed in order to model the normal behavior of the generator and the gearbox. Following the same order stated in our workflow diagram in Figure \ref{fig:work}, we will walk through each step in great detail hereafter.
+
+## Exploratory Data Analysis and variable selection
+
+As with all statistical modeling, data exploration is always the first step prior to any model development. The most important variable in SCADA data that indicates how well the turbine is operating is the power production data (in Wh). According to the constructor, the ideal curve of said variable should be S shaped when plotted against the windspeed (in m/s).
+
+```{r, include=FALSE}
+#-- load libraries
+rm(list=ls())
+library(ensaiWind)
+library(tidyr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+data_path = "/home/id1813/Smart Data project/Report/Wind-Turbine-Report/Code/"
+source(paste0(data_path,"functions.R"))
+
+#-- read data
+data_2016 = read.csv2(paste0(data_path, "wind-farm-1-signals-2016.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+data_2017 = read.csv2(paste0(data_path,"data_wind_prod.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+#-- bind data
+data_total = bind_rows(data_2016,data_2017) %>% 
+  arrange(Datetime) %>%
+  na.omit() %>%
+  as_tibble()
+
+#-- load the 2016 and 2017 failure data
+failure_2016 = read.csv2(paste0(data_path,"htw-failures-2016.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
+  select(-Timestamp)
+
+failure_2017 = read.csv2(paste0(data_path,"htw-failures-2017.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>% 
+  select(-Timestamp)
+
+#-- bind data
+failure_total = rbind(failure_2016, failure_2017) %>% arrange(Datetime)
+```
+
+```{r prod, fig.align='center', fig.width=10, fig.height=6, warning=FALSE, fig.cap="Power production curve in all turbines for 2016 data with respect to the windspeed"}
+plot_by_month(data_2016, "Amb_WindSpeed_Avg","Prod_LatestAvg_TotActPwr")
+```
+
+Figure \ref{fig:prod} displays the power production data with respect to the windspeed, by month of all the turbines, in year 2016. It shows that the theoretical curve of the power production (perfect S shape) is reasonably accurate when compared to real production data. This entails normal behavior of the turbine. However, we notice some rogue data points that seem like two dimensional outliers. For example, windspeed of $10m/s$ should non-zero power production data which is not always the case. This indicates that either the whole turbine was down for maintenance related reasons or that it is, in fact, a two dimensional outlier which we will explore later on in detail. 
+ 
+Failures almost always come from abnormal overheating of the component in question. In the case of the SCADA data, the components of interest in this study are the generator and the gearbox. Naturally, out of the 84 variables provided, we will perform some manual variable selection based on engineering knowledge of the underlying systems as well as some other related research work ([references 2,3]). Temperature variables are obvious candidates to be predictors as they offer rich insight into the behavior of a component. Therefore, the generator's speed (in RPM) will be the target variable when modeling the generator and the predictors are the following : 
+
+* Amb_WindSpeed_Avg
+* Prod_LatestAvg_TotActPwr
+* Prod_LatestAvg_TotReactPwr
+* Nac_Temp_Avg
+* Gen_Bear_Temp_Avg
+* Gen_Phase1_Temp_Avg
+* Gen_Phase2_Temp_Avg
+* Gen_Phase3_Temp_Avg
+
+Research article [2] claims that the study carried out to model the gearbox in a wind-turbine has been successful when choosing the gearbox's oil temperature as a target variable when modeling. Following their footsteps, we choose the same variable as a target and the predictors are the following :
+
+* Gear_Bear_Temp_Avg (Temperature of bearing that holds the rotor with blades) *
+* Hyd_Oil_Temp_Avg (Temperature of the oil which cool the gearbox)
+* Amb_WindSpeed_Avg (The average wind speed)
+* Prod_LatestAvg_TotActPwr (Production power)
+* Prod_LatestAvg_TotReactPwr (Production power)
+* Blds_PitchAngle_Max (Angle of the wind turbine blades) *
+* Amb_Temp_Avg (the ambian temperature)
+
+To avoid overcrowding the illustrations, we choose to plot only turbine T06's generator and gearbox variables in the year 2016.
+
+```{r}
+#-- Variable selection by including all generator AND gearbox variables 
+df = data_total %>% 
+  select(Turbine_ID,
+         Datetime,
+         Gen_RPM_Avg,
+         Amb_WindSpeed_Avg,
+         Prod_LatestAvg_TotActPwr,
+         Prod_LatestAvg_TotReactPwr,
+         Nac_Temp_Avg,
+         Gen_Bear_Temp_Avg,
+         Gen_Phase1_Temp_Avg,
+         Gen_Phase2_Temp_Avg,
+         Gen_Phase3_Temp_Avg,
+         Gear_Bear_Temp_Avg,
+         Amb_Temp_Avg,
+         Gear_Oil_Temp_Avg,
+         Amb_WindSpeed_Avg,
+         Hyd_Oil_Temp_Avg,
+         Blds_PitchAngle_Max) %>%
+  arrange(Datetime) %>%
+  filter(Turbine_ID == "T06", Datetime < "2017-01-01") %>%
+  droplevels() %>%
+  arrange(Datetime) %>%
+  as_tibble()
+
+df_full = df %>% fill_my_na()  #-- function to fill datetime with regular intervals of 10 mins
+```
+
+```{r, fig.align='center', fig.width=9, fig.height=4, warning=FALSE, fig.cap="Plot of the generator's temperature variables along time with its dates of failures in the black line"}
+#-- get temperature variables in the failure periods
+library(scales)
+var_to_plot = df_full %>%
+  select(Datetime_full, Gen_Bear_Temp_Avg, Gen_Phase1_Temp_Avg, Gen_Phase2_Temp_Avg, Gen_Phase3_Temp_Avg) %>%
+  # filter(Datetime < "2016-12-01" & Datetime > "2016-07-01") %>%
+  gather(key = "Temp_Variable", value = "Value", -Datetime_full)
+
+fail_dates_2016 = failure_2016 %>% 
+  filter(Turbine_ID == "T06" , Component == "GENERATOR") %>% 
+  pull(Datetime)
+
+#-- plot the variables along with lines to specify failure dates
+ggplot(var_to_plot, aes(x = Datetime_full, y = Value, color = Temp_Variable )) + 
+  geom_point(alpha = 0.3) + 
+  theme_bw() + 
+  geom_vline(xintercept = fail_dates_2016, size=1) +
+  ggtitle("Generator temperature variables along with failure dates") +
+  xlab("Date")+
+  ylab("Temperature value [degrees C]")+
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.text = element_text(size = 6),
+        axis.text=element_text(size=6),
+        axis.title=element_text(size=8,face="bold"))
+```
+
+
+
+
+
+# References 
+
+[1] https://community.ieawind.org/about/member-activities/france#:~:text=During%202017%2C%20France%20broke%20its,since%202016%2C%20totaling%2022.6%20TWh.
+
+[2] article effects of the preprocessing 
+
+[3] article of generator modeling (the one with auto encoders)
