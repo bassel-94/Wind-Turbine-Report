@@ -1,30 +1,114 @@
 ---
 title: "Report_Guillaume"
 author: "Guillaume"
-date: "2/5/2021"
+date: "2/7/2021"
 output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r,include=FALSE}
+library(dplyr)
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
+## Data description 
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+### Signals
+
+The data set used in our Smart Data project is SCADA (Supervisory Control And Data Acquisition) data acquired on four Wind Turbines, for the years 2016 and 2017.
+
+It consists in a collection of 83 variables, that are recorded every 10 minutes, and results in a data frame of more 400 000 observations, as there are some periods with no data recorded. One can find below the first observations of year 2016 :
+
+```{r,include=FALSE}
+data_2016<-read.csv2("wind-farm-1-signals-2016.csv")
+data_2016$Timestamp <- as.POSIXct(data_2016$Timestamp, format = "%Y-%m-%dT%H:%M:%OS")
+data_2016<-data_2016 %>% arrange(Timestamp)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+head(data_2016,10)
+```
+
+Besides the identifier of the turbine and the timestamp, a majority of variables correspond to a measurement made on a turbine's component in the following list :
+
+* Generator
+* Hydraulic group
+* Gearbox
+* Nacelle 
+* Rotor
+* Transformer
+* Grid
+* Controller
+* Spinner
+* Blades
+
+to which we add :
+
+* Electricity production
+* Ambient measurements (e.g. temperature, wind speed,...)
+
+Each measurement in the data set is made onto the last ten minutes observed. 
+
+### Failures
+
+In addition to this data set, we also have access to the failure logs of the turbines, where we can find the component that failed, the time the failure was found out, and some remarks made by the technician who observed the failure. We present below the first lines of these logs.
+
+```{r,include=FALSE}
+failures<-read.csv2("total-failures.csv")
+```
+
+```{r}
+head(failures)
+```
+
+One can immediately observe that the generator is the most sensitive component, in the sense that it is the one which suffered the most failures, especially with turbine 6.
+
+Note that the failure logs only stores the time when the failure was observed, not the time the failure actually occured :
+
+_Make a small graph showing this ??_
+
+# Approach
+
+## Data Preprocessing
+
+As presented in the methodology section, we intend to model the normal behavior of a turbine. In order to train well our model, it is thus necessary to have a 'clean' data set, from which the outliers and anomalies were removed. Providing such a data set is quite difficult here. Indeed, we observed a lot of variability in our data ( _See FIGURE ?_ ). The cleaning of our data will be made in two steps :
+
+* Univariate method
+* Multivariate method
+
+## Univariate method
+
+A first cleaning of our data set consists to detect outliers for each variable independently. We consider here that a value is an outlier if it is outside the bounds defined by the quantiles of order 0.5% and 99.5% of te variable considered. Whenever an outlier is detected this way, the entire observation (i.e. the entire row) is removed from the data set, as it is consider unreliable or at least unusual.
+
+_Tell how many values were removed ??_
+
+Using this technique, we obviously removed very few observations, and we still have to deal with a lot of variability in our data set. A second and more restrictive criterion is used in the following.
+
+## Multivariate method
+
+The second criterion used to detect and remove outliers is based on the theoretical power curve of a turbine, which is supposed to be 'S-shaped'. We can see in the figure ??? below that a lot of data are located far away from this curve, and could be considered as outliers.
+
+First of all, we can immediately remove the data for which the power production is extremely low (strictly less than 1 kW _Check for the right unit_). Indeed, zero production means that the turbine is either stopped or we have an abnormal value. In both cases, the data can be considered as an outlier.
+
+Secondly, we fit a logistic model on the production data, which is supposed to model the 'S-shaped' curve :
+
+$$ 
+y=\frac{Asym}{(1+\exp((x_{mid}-x)/scal))} 
+$$
+where $y$ stands for the production and $x$ for the wind speed. $Asym, \ x_{mid}$ and $scal$ are parameters which have to be estimated.
+
+We plot the following graphs to estimate visually the goodness of our fit :
+
+_insert graph_
+
+We can quickly see that the fit seems good (linear trend between predicted and observed values).
+
+Finally, we fix a threshold of $50 \ kW$ for the residuals. Whenever a residual has an absolute value greater than this threshold, it is considered as an outlier, and therefore removed from our clean data set. We obtain the following power production scatter plot for the clean data set :
+
+Note that more than _NUMBER_ values have been removed from the original data set. However, if we are convinced that a lot of outliers have been removed, we cannot be sure that the clean data set does not contain any. Nevertheless, considering a value as an outlier can be sometimes subjective, and we can reasonably consider that the data set that we will use for training our model contains a large majority of usual values.
+
+## Modeling the normal behavior of the generator
