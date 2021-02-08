@@ -1,0 +1,235 @@
+---
+title: |
+  | \vspace{8cm} \textbf{Wind-Turbine predictive maintenance for TOTAL}
+author:
+- Bassel MASRI
+- Guillaume FRANCHI
+date: "2/5/2021"
+output:
+  pdf_document:
+    number_sections: yes
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)    #-- do not include any code chunks
+knitr::opts_chunk$set(warning = FALSE) #-- do not produce any warnings 
+#knitr::opts_chunk$set(dev = 'png')     #-- to reduce the size of the knitted pdf
+```
+
+\newpage
+\pagenumbering{arabic}
+\tableofcontents
+\newpage
+
+# Introduction
+
+Many government policies are researching sustainable energy production resources in order to reduce their carbon footprint. In particular, harvesting the wind's kinetic energy through wind turbines accounts for nearly 28% of all installed renewable power capacity [reference.1]. However, heavy machinery entails many engineering challenges like operation and maintenance. It is estimated that about 30% of the total generation costs is induced by maintenance downtime which made predictive maintenance a hot research topic for the last few years. Recent breakthroughs in connected sensors, robotics and internet of things (IoT) have allowed manufacturers to collect big amounts of data from different parts of the turbine through their SCADA (Supervisory Control and Data Acquisition) system in order to monitor its behavior. Recent advances in machine learning techniques and programming platforms have opened a door to analyzing such amounts of data in the aim of monitoring faulty behaviors in the form of anomaly detection and failure predictions which is the main focus of this project.
+
+Throughout this study, we introduce and discuss potential ways to approach analyzing the SCADA data in order to detect faulty behaviors of a wind turbine and, by extension, reducing its down time when performing maintenance tasks on its main components such as the generator and the gearbox. 
+
+# The problem and the data
+
+The following subsections are dedicated for describing the general workflow of this project and presenting the SCADA data that we have been given for the smart data project. Descriptions of the nature of the variables, the failure logs, and some exploratory data analysis are presented below.
+
+## Project workflow
+
+The analysis steps that have been explored in order to model the normal behavior and identify abnormal behavior of wind turbines are presented in the flowchart in Figure \ref{fig:work}.
+
+```{r work, out.width="35%", fig.cap="Workflow diagram of the study", fig.align='center'}
+knitr::include_graphics(rep('Figures/workflow.png'))
+```
+
+The ultimate goal of this study is to model the normal behavior and predict a failure through data points that fall outside the envelop of a *normal* behavior of a wind-turbine. To do so, we focus this study on two main components; the *generator* and the *gearbox*, as their maintenance task results in the longest downtimes. Each of the steps mentioned in the workflow will be discussed in greated detail throughout this report.
+
+## Signal Variables
+
+Before diving into the details of each section mentioned in the workflow above, we first define the nature of the variables at hand. The SCADA system collects information about electrical and mechanical components through temperature sensors cleverly placed on multiple components such as Transformers, Generator, Gearbox, the hub that encapsulates the systems and some other hydrolic and electric systems. Some additional information about the power production of the turbine as well as the angle orientation of the blades is also available.
+
+The data is acquired on four Wind Turbines identified in a variable called *Turbine_ID* over two years (2016 and 2017) with a sampling frequency of 10 minutes. Besides the identifier of the turbine and the timestamp, a majority of variables correspond to measurements such as temperatures (in degrees celcius), power production (in Watt-hour), orientation (in degrees) and speed (in meters per second). Each measurement in the data set is made in the last ten minutes observed.
+
+In total, the SCADA data consists of a collection of 83 variables with more than $400,000$ observations. One can find below the first few observations of year 2016 below: 
+
+```{r, include=FALSE}
+#-- load libraries
+rm(list=ls())
+library(ensaiWind)
+library(tidyr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(scales)
+source("Code/functions.R")
+
+#-- load original data
+df_total = read_csv("Code/original_data.csv.gz") %>% 
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  as_tibble()
+
+#-- load the 2016 and 2017 failure data
+failures = read_csv("Code/failures.csv.gz") %>% 
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  as_tibble()
+```
+
+```{r head}
+#-- head of the data
+to_display = df_total %>%
+  select(Turbine_ID, Datetime, Gen_RPM_Avg, Gear_Oil_Temp_Avg, Amb_WindSpeed_Avg) %>%
+  as_tibble() %>%
+  slice_head(n=5)
+
+knitr::kable(to_display, caption = "The first few rows and columns of the SCADA data", align = 'c')
+```
+
+## Failure logs
+
+In addition to the provided SCADA data, we also have access to the failure logs of the turbines, where we can find information regarding the component that failed, the time the failure was found out, and some remarks made by the technician who observed the failure. We present below the first lines of these logs.
+
+```{r}
+failures_to_display = failures %>%
+  select(Turbine_ID, Datetime, Component, Remarks) %>%
+  as_tibble() %>%
+  mutate(Remarks = paste0(substr(Remarks, 1, 20), "...")) %>%
+  slice_head(n=5)
+
+knitr::kable(failures_to_display, caption = "The first few rows of the failure logs", align = 'c')
+```
+
+Our initial analysis of the failure logs shows that there are some spelling mistakes in the Remarks which makes the data prone to humain errors. Indeed, the failures are logged by technicians on site during working ours even though the alarm may have been triggered beforehand. One can also observe that the generator is the most sensitive component, in the sense that it is the one which suffered the most failures, especially with turbine T06. We explore the failures in further detail later.
+
+## Variable selection
+
+Failures almost always come from abnormal overheating of the component in question. In the case of the SCADA data, the components of interest in this study are the generator and the gearbox. Naturally, out of the 84 variables provided, we will perform some manual variable selection based on engineering knowledge of the underlying systems as well as some other related research work ([references 2,3]). Only the variables that offer the richest insight into the behavior of a component are chosen to model the generator and the gearbox. 
+
+To model the behavior of the generator, we choose the generator's speed (in RPM) as the target variable and its related temperature variables as predictors such as Windpseed, power production (active and reactive), the Nacelle temperature, the generator's bearing temperature and the three temperatures of the phases of the generator (phases 1,2 and 3). Since the sensors provide information about the minimum, maximum, standard deviation and mean of the data collected in the 10 minute-interval, we choose the average.
+
+The authors who carried out the research mentioned in article [2] claim that the study carried out to model the gearbox in a wind-turbine has been successful when choosing the gearbox's oil temperature as a target variable. Following their footsteps, we choose the same variable as a target and the variables concerning the gearbox bearing temperature, hydrolic oil temperature, windspeed, production power (active and reactive), the blade pitch angle and the ambiant temperature as predictors. Again, we take the average of the readings in the 10 minute-interval.
+
+## Exploratory data analysis
+
+As with all statistical modeling, data exploration is always the first step prior to any model development. Therefore, our analysis begins with a typical exploratory data analysis approach where we investigate the readings of some of the most important variables in the SCADA data to visally spot some important patterns. Such analysis is a crucial first step towards understanding the normal behavior of the turbines as well as understanding the abnormal behavior that triggered a failure.
+
+### Power production curve
+
+The most important variable in SCADA data that indicates how well the turbine is operating is the power production data (in Wh). Since the manufacturers provide a datasheet describing the optimal functionning of a power production curve, we use that as a basis to understand how well the turbine is operating. According to the constructor, the ideal curve of said variable should be **S** shaped when plotted against the windspeed (in m/s).
+
+```{r prod, fig.align='center', fig.width=8, fig.height=5, warning=FALSE, fig.cap="Power production curve in all turbines for 2016 data with respect to the windspeed"}
+plot_by_month(df_total %>% filter(Datetime < "2017-01-01"), "Amb_WindSpeed_Avg","Prod_LatestAvg_TotActPwr")
+```
+
+Figure \ref{fig:prod} displays the power production data with respect to the windspeed, by month of all the turbines, in year 2016. It shows that the theoretical curve of the power production (perfect S shape) is reasonably accurate when compared to real production data. This entails normal behavior of the turbine. However, we notice some rogue data points that seem like two dimensional outliers. For example, windspeed of $10m/s$ should non-zero power production data which is not always the case. This indicates that either the whole turbine was down for maintenance related reasons or that it is, in fact, a two dimensional outlier which we will explore later on in detail.
+
+### Generator's failures
+
+In order to analyze the failure of the generator, it is important to understand its causes. To do so, we choose to plot only turbine T06's generator related temperatures and add thick black lines at each failure date. To avoid overcrowding the plots, we will plot the data in a smaller time window (from 2016-06-01 to 2016-12-01). This time-window in which we plot the variables is the time-window in which we had most of the generator failures.
+
+```{r genvar, fig.align='center', fig.width=8, fig.height=4, fig.cap="Plot of the generator's temperature variables with its dates of failures in black lines"}
+#-- get failure dates
+fail_dates_2016 = failures %>% 
+  filter(Turbine_ID == "T06" , Component == "GENERATOR") %>% 
+  pull(Datetime)
+
+#-- Plot pipeline for generator variables
+df_to_plot = df_total %>%
+  select(Turbine_ID, 
+         Datetime, 
+         Gen_Bear_Temp_Avg, 
+         Gen_Phase1_Temp_Avg, 
+         Gen_Phase2_Temp_Avg, 
+         Gen_Phase3_Temp_Avg) %>%
+  filter(Turbine_ID == "T06") %>%
+  filter(Datetime < "2016-12-01" & Datetime > "2016-06-01") %>%
+  droplevels() %>%
+  arrange(Datetime) %>%
+  as_tibble() %>%
+  fill_my_na()
+
+df_to_plot %>%
+  gather(key = "Temp_Variable", value = "Value", -Datetime_full, -Turbine_ID) %>%
+  ggplot(aes(x = Datetime_full, y = Value, color = Temp_Variable )) + 
+  geom_point(alpha = 0.2, size = 0.7) + 
+  theme_bw() + 
+  geom_vline(xintercept = fail_dates_2016, size=1) +
+  ggtitle("Generator temperature variables along with failure dates") +
+  xlab("Date")+
+  ylab("Temperature value [degrees C]")+
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.text = element_text(size = 6),
+        axis.text=element_text(size=6),
+        axis.title=element_text(size=8,face="bold"))
+```
+
+Preliminary analysis of the plots displayed in Figure \ref{fig:genvar} for the generator variables show that there is some missing values. In fact, in the missing 10 day period represented as the time gap from 2016-07-10 to 2016-07-20, the generator has been replaced on 2016-07-11 according to the failure logs and the turbine remained un-operational for a few days afterwards as part of the maintenance work. 
+
+In addition, We notice that not all generator failures indicate abnormal temperature behavior. In fact, out of the 5 failures represented in Figure \ref{fig:genvar} that heppened in turbine T06's generator, only two are reliable; the third and the fourth failures for they show abnormal temperature behaviors (up to 200 degrees). Said failures will be considered as a reference in the anomaly detection techniques we will discuss in later sections.
+
+Finally, the plots show that some rogue temperature measurement that were up to 200 degrees for all 4 variables were not discarted as a failure in the logs. If we zoom in further on this particular event for which no failures logs have been registered, we get the plot in \ref{fig:zoom}  We may consider them as outliers.
+
+```{r zoom, fig.align='center', fig.width=8, fig.height=4, fig.cap="Plot of the generator's rogue temperature points which have not been detected as failures"}
+df_to_plot %>%
+  filter(Datetime_full < "2016-12-01" & Datetime_full > "2016-10-15") %>%
+  gather(key = "Temp_Variable", value = "Value", -Datetime_full, -Turbine_ID) %>%
+  ggplot(aes(x = Datetime_full, y = Value, color = Temp_Variable )) + 
+  geom_point(alpha = 0.5, size = 0.7) + 
+  theme_bw() + 
+  geom_vline(xintercept = fail_dates_2016, size=1) +
+  ggtitle("Generator temperature variables along with failure dates") +
+  xlab("Date")+
+  ylab("Temperature value [degrees C]")+
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 week")) + 
+  theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.text = element_text(size = 6),
+        axis.text=element_text(size=6),
+        axis.title=element_text(size=8,face="bold"))
+```
+
+The logs show that on 2016-10-27 (the black line in Figure \ref{fig:zoom}), the generator has been replaced. A few days later, the sensors were clocked at 205 degrees celcius for a three days straight from 2016-11-02 to 2016-11-04. Such high values can be explained by multiple reasons. Either they are outliers (i.e. caused by sensor calibration issues) or an undetected anomaly.
+
+### Gearbox's failures
+
+Upon examining the failure dates of the gearbox component of the Turbine T06, we notice that only one failure happened in 2017-10-17.  Therefore, we will visualize the temperature variables and the failure date in a zoomed-in 2 weeks window (i.e. 7 days before the failure occured and 7 days after).
+
+```{r}
+#-- define gearbox variables
+gear_var = c("Datetime", 
+             "Turbine_ID", 
+             "Gear_Oil_Temp_Avg", 
+             "Gear_Bear_Temp_Avg", 
+             "Hyd_Oil_Temp_Avg",
+             "Amb_WindSpeed_Avg",
+             "Prod_LatestAvg_TotActPwr",
+             "Prod_LatestAvg_TotReactPwr",
+             "Blds_PitchAngle_Avg",
+             "Amb_Temp_Avg")
+
+fail_gear_dates = failures %>%
+  filter(Component == "GEARBOX", Turbine_ID == "T06") %>% 
+  pull(Datetime)
+```
+
+```{r gear, fig.align='center', fig.width=8, fig.height=4, fig.cap="Plot of the gearbox's variables, the failure date in black and the 60 degrees threshold in darkred"}
+df_total %>%
+  select(all_of(gear_var), -contains("Pwr"), -Amb_Temp_Avg, -Amb_WindSpeed_Avg) %>%
+  filter(Datetime < "2017-10-24" & Datetime > "2017-10-10") %>%
+  gather(key = "Variable", value = "Values", -Datetime, -Turbine_ID) %>%
+  ggplot(aes(x=Datetime, y=Values, col = Variable)) + 
+  geom_point(alpha = 0.5, size = 0.7) +
+  theme_bw() + ggtitle("Gearbox's important variables scatter plot") + 
+  geom_vline(xintercept = fail_gear_dates, size = 1) + 
+  geom_hline(yintercept = 60, color = "darkred") +
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("2 days")) + 
+  theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.text = element_text(size = 6),
+        axis.text=element_text(size=6),
+        axis.title=element_text(size=8,face="bold"))
+```
+
+Figure \ref{fig:gear} shows that around the date of the failure, the pitch angle had changed drastically from angles centered around 0 to more than 75 degrees in a matter of minutes. Similarly, some abnormally high temperatures for the gearbox bearing and the gearbox oil temperature above 60 degrees celcius. In fact, according to a study conducted on wind turbines' gearboxes, under normal conditions the temperature in the gearbox (oil and bearing) should not surpass 60 degrees. Indeed, the reliability of the gearbox becomes less than 50% should its temperature exceeds 60 degrees celcius. A combination of all the observed abnormal conditions could have triggered the failure in the gearbox.
+
+# Approach
