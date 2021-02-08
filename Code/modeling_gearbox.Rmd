@@ -1,0 +1,562 @@
+---
+title: "Modeling Normal Behavior of Gearbox"
+output:
+  html_document:
+    df_print: paged
+html_notebook: default
+---
+
+# Prerequesites
+
+The aim of the this notebook is to go through some modeling techniques in order classify unhealthy operation of the component Gearbox of the wind turbines. The model evaluation technique will be based on the RMSE, MAE and R squared of the test set and the main regression algorithm we will use is the xgboost.
+
+```{r, warning = FALSE, echo = FALSE, include=FALSE}
+rm(list=ls())
+library(ensaiWind)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(lubridate)
+library(ggplot2)
+library(anomalize)
+library(vip)
+library(Metrics)
+library(xgboost)
+library(scales)
+library(parallel)
+library(gridExtra)
+source("functions.R")
+```
+
+# Read data and select variables 
+
+The steps we will go through in this notebook are :
+
+* Select only one turbine to model. For the gearbox, T01 which is the only one with a true positive failure logged
+* Read and split the clean data (called filtered_data.csv) according to 80-20 train validation ratio.
+* Fit an xgboost model on the training set and validate the model on the test set using RMSE, MAE and R2.
+* Use the evaluation metrics above to tune and select the best model (and do feature selection).
+* Once the model is trained and validated, we perform some post-processing on the test set to predict the anomalies.
+* Final step is to use the post-processing technique above to predicting the failures on the un-processed data (test set).
+
+To model the gearbox we use the following variables : 
+
+* Gear_Oil_Temp_Avg, <- our target *
+* Gear_Bear_Temp_Avg (Temperature of bearing that holds the rotor with blades) *
+* Hyd_Oil_Temp_Avg (Temperature of the oil which cool the gearbox)
+* Amb_WindSpeed_Avg (The average wind speed)
+* Prod_LatestAvg_TotActPwr (Production power)
+* Prod_LatestAvg_TotReactPwr (Production power)
+* Blds_PitchAngle_Max (Angle of the wind turbine blades) *
+* Amb_Temp_Avg (the ambian temperature)
+
+```{r, include = FALSE}
+#-- read the clean data and select gearbox variables
+setwd("~/Smart Data project/new code")
+
+#-- define gearbox variables
+gear_var = c("Datetime", 
+             "Turbine_ID", 
+             "Gear_Oil_Temp_Avg", 
+             "Gear_Bear_Temp_Avg", 
+             "Hyd_Oil_Temp_Avg",
+             "Amb_WindSpeed_Avg",
+             "Prod_LatestAvg_TotActPwr",
+             "Prod_LatestAvg_TotReactPwr",
+             "Blds_PitchAngle_Max",
+             "Amb_Temp_Avg")
+
+df = read_csv("filtered_data.csv.gz") %>% 
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  filter(Turbine_ID == "T01") %>%
+  as_tibble()
+
+#-- read the unfiltered data and select gearbox variables
+df_test = read_csv("unfiltered_data.csv.gz") %>% 
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  select(names(df)) %>%
+  filter(Turbine_ID == "T01") %>%
+  as_tibble()
+
+#-- load the 2016 and 2017 production data
+data_2016 = read.csv2("wind-farm-1-signals-2016.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+data_2017 = read.csv2("data_wind_prod.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+#-- bind data
+data_total = bind_rows(data_2016,data_2017) %>% 
+  arrange(Datetime) %>% 
+  select(names(df)) %>%
+  na.omit() %>%
+  filter(Turbine_ID == "T01")
+  as_tibble()
+
+#-- load the 2016 and 2017 failure data
+failure_2016 = read.csv2("htw-failures-2016.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
+  select(-Timestamp)
+
+failure_2017 = read.csv2("htw-failures-2017.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>% 
+  select(-Timestamp)
+
+#-- bind data
+failure_total = rbind(failure_2016, failure_2017) %>% arrange(Datetime)
+```
+
+```{r}
+failure_total %>% filter(Turbine_ID == "T01")
+```
+
+Only one failure happened in T01's generator
+
+# Analysis of the failure
+
+Visualize the temperature variables and the failure dates of T01. We will zoom on the window of failure which happened in 2016-07-18. We will take 3 days prior and 3 days after.
+
+```{r, fig.width=16, fig.height=6, fig.align='center'}
+library(scales)
+fail_dates = failure_total %>%
+  filter(Component == "GEARBOX", Turbine_ID == "T01") %>% 
+  pull(Datetime)
+
+data_total %>% 
+  select(-contains("Pwr"), -Turbine_ID, - Gen_RPM_Avg) %>%
+  filter(Datetime < "2016-07-21" & Datetime > "2016-07-15") %>%
+  gather(key = "Variable", value = "Values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=Values, col = Variable)) + geom_point() +
+  theme_bw() + ggtitle("Gearbox's important variables scatter plot") + 
+  geom_vline(xintercept = fail_dates) + 
+  scale_x_datetime(date_labels = "%d %H", breaks = date_breaks("4 hours")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+It seems that setting the blade pitch angle has an effect on generator related variables. Setting it to lower values seem to decrease the temperature related to the generator. 
+In addition, setting it to about 75 degrees for more than 20 hours in a row seemd to have triggered a gear pump damage. 
+
+```{r, fig.width=16, fig.height=6, fig.align='center'}
+data_total %>% 
+  select(all_of(gear_var), -Turbine_ID, -contains("Pwr")) %>%
+  filter(Datetime < "2016-07-21" & Datetime > "2016-07-15") %>%
+  gather(key = "Variable", value = "Values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=Values, col = Variable)) + geom_point() +
+  theme_bw() + ggtitle("Gearbox's important variables scatter plot") + 
+  geom_vline(xintercept = fail_dates) + 
+  scale_x_datetime(date_labels = "%d %H", breaks = date_breaks("4 hours")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Gearbox temperature related variables do not show any abnormal readings for the same period of failures. In fact, the plot shows a smooth behavior in the readings
+
+```{r, fig.width=16, fig.height=6, fig.align='center'}
+#-- plotting the production in the same window
+p1 = data_total %>% 
+  select(Prod_LatestAvg_TotActPwr, Datetime) %>%
+  filter(Datetime < "2016-07-21" & Datetime > "2016-07-15") %>%
+  gather(key = "Variable", value = "Values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=Values, col = Variable)) + geom_line() +
+  theme_bw() + ggtitle("Gearbox's important variables scatter plot") + 
+  geom_vline(xintercept = fail_dates) + 
+  scale_x_datetime(date_labels = "%d %H", breaks = date_breaks("4 hours")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p2 = data_total %>% 
+  select(Amb_WindSpeed_Avg, Datetime) %>%
+  filter(Datetime < "2016-07-21" & Datetime > "2016-07-15") %>%
+  gather(key = "Variable", value = "Values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=Values, col = Variable)) + geom_line() +
+  theme_bw() + ggtitle("Gearbox's important variables scatter plot") + 
+  geom_vline(xintercept = fail_dates) + 
+  scale_x_datetime(date_labels = "%d %H", breaks = date_breaks("4 hours")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  geom_hline(yintercept = 15, col = "darkred")
+
+grid.arrange(p1,p2, nrow = 2)
+```
+
+The production power shows irregular readings a few hours prior to the failure and finally it stops at the date of the failure for almost two days. We can see that it is not caused by the wind because it maintained a high speed. The failure actually cause the turbine to be shut down.
+
+Maybe a time series decomposition on the target variable could show some anomalies that may have triggered the alarm. We will take the last 6 months of data
+
+```{r, fig.align='center', fig.width=15, fig.height=5}
+test = data_total %>%
+  as_tibble() %>%
+  time_decompose(Blds_PitchAngle_Max, method = "stl", frequency = "auto", trend = "auto", message = FALSE) %>%
+  anomalize(remainder)
+
+cat(sum(test$anomaly == "Yes"), "Anomalies have been detected")
+
+test %>% 
+  filter(Datetime < "2016-07-21" & Datetime > "2016-07-15") %>%
+  plot_anomalies(alpha_dots = 0.5, size_circles = 3.5, alpha_circles = 0.5) + 
+  ggtitle("Anomalies of the gear oil temperature using TS decomposition") + 
+  geom_vline(xintercept = fail_dates)
+```
+
+By that logic, the time series decomposition indeed detects the consecutive high values of the blade angles as anomalies and therefore they are the primary candidate that caused the failure.
+
+```{r,fig.width=16, fig.height=6, fig.align='center'}
+data_total %>% 
+  select(Gear_Oil_Temp_Avg, Blds_PitchAngle_Max, Datetime) %>%
+  filter(Datetime < "2016-07-21" & Datetime > "2016-07-15") %>%
+  gather(key = "Variable", value = "Values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=Values, col = Variable)) + geom_point(alpha = 0.5) +
+  theme_bw() + ggtitle("Gearbox's important variables scatter plot") + 
+  geom_vline(xintercept = fail_dates)
+```
+
+There is some correlation between the pitch and
+```{r}
+cor(data_total$Blds_PitchAngle_Max, data_total$Gear_Oil_Temp_Avg)
+```
+
+
+```{r, include=FALSE}
+#-- train-validation split
+idx_train = seq(1, floor(dim(df)[1]*0.8))
+df_train = df[idx_train,]
+df_valid = df[-idx_train,]
+```
+
+```{r}
+head(df_train)
+head(df_valid)
+```
+
+
+```{r, fig.width=16, fig.height=4, fig.align='center'}
+#-- plot the target variable to see what it looks like
+ggplot(df_train, aes(x = Datetime, y =Gear_Oil_Temp_Avg )) + 
+  geom_point(alpha = 0.1) + theme_bw() +
+  ggtitle("Gear Oil temperature average in time") +
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The temperature is not linear. Therefore, we will avoid using gblinear as a booster and leave it to its default; gbtree.
+
+# XGBOOST model for the gearbox
+## Model normal behavior
+
+Extreme gradient boosting (XGBoost) is an optimized distributed gradient boosting library. It offers a wide range of hyperparameters such as:
+
+* Regularization hyperparameter to provide an extra later of protection against over-fitting
+* Early stopping criterion to stop growing trees when they offer no more improvement to the model
+* Parallel processing (since it is sequential by nature)
+* Choice of a loss function to optimize the gradient boosting models
+
+To get a full list of the hyperparameters that we can tune, see https://xgboost.readthedocs.io/en/latest/parameter.html
+
+**NOTE:** XGBOOST implementations take as input a matrix argument for the features and a vector argument for the target variable. Therefore, some additional data manipulation is required to train the model. Since our model does not contain any categorical variables, no one-hot encoding will be required. If one desires to include "Turbine_ID" as a feature than the latter should be encoded.
+
+```{r}
+#-- select the training features and target as a matrix and a vector 
+X_train = df_train %>%
+  select(-Gear_Oil_Temp_Avg, -Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_train = df_train %>% 
+  pull(Gear_Oil_Temp_Avg)
+
+#-- select the testing features and target as a matrix and a vector 
+X_valid = df_valid %>%
+  select(-Gear_Oil_Temp_Avg, - Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_valid = df_valid %>%
+  pull(Gear_Oil_Temp_Avg)
+
+#-- detect number of cores for parallel computing, we have 32! (we use half)
+n = detectCores()
+
+#-- train xgboost model
+gear_xgb = xgboost(
+  data = X_train,
+  label = Y_train,
+  verbose = 0,
+  nrounds = 2000,                 #-- max number of boosting iterations
+  params = list (eta = 0.2,       #-- learning rate for the gradient descent step
+                 nthread = n/2)   #-- for parallel computing on 6 cores
+)
+```
+
+```{r}
+#-- get train prediction and evaluation metrics
+Y_train_pred = predict(gear_xgb, newdata = X_train)
+train_rmse = rmse(Y_train_pred, Y_train)
+train_mae = mae(Y_train_pred, Y_train)
+train_r2 = cor(Y_train_pred, Y_train)^2
+
+cat("train RMSE is", train_rmse, "\n")
+cat("train MAE is", train_mae, "\n")
+cat("train R2 is", train_r2, "\n")
+
+#-- get test predictions and evaluation metrics
+Y_valid_pred = predict(gear_xgb, newdata = X_valid)
+valid_rmse = rmse(Y_valid_pred, Y_valid)
+valid_mae = mae(Y_valid_pred, Y_valid)
+valid_r2 = cor(Y_valid_pred, Y_valid)
+
+cat("\nvalidation RMSE is", valid_rmse, "\n")
+cat("validation MAE is", valid_mae, "\n")
+cat("validation R2 is", valid_r2, "\n")
+```
+
+```{r, fig.width=12, fig.height=6, warning=FALSE}
+#-- build data frames of predicted and observed values of train and test data
+g1 = data.frame(observed = df_valid$Gear_Oil_Temp_Avg, predicted = Y_valid_pred)
+g2 = data.frame(observed = df_train$Gear_Oil_Temp_Avg, predicted = Y_train_pred)
+
+#-- plot predicted values against real values and see if its linear
+p1 = ggplot(g1, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in validation set Gear_Oil_Temp") + 
+  geom_smooth(method='lm', formula = y~x, color = "steelblue") +
+  geom_line(aes(y = predicted), size = 1, color = "red", linetype = "dashed")
+
+p2 = ggplot(g2, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in training set Gear_Oil_Temp")+ 
+  geom_smooth(method='lm', formula = y~x, color = "steelblue") +                        #-- the linear regression line
+  geom_abline(intercept = 0, slope = 1, size = 1, color = "red", linetype = "dashed") + #-- the slope line (y=x)
+  scale_color_discrete(name = "Type", labels = c("lm line", "slope"))
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+To get a feature importance plot, we do the following 
+
+```{r, fig.width=10, fig.height=4, warning=FALSE, fig.align='center'}
+vip::vip(gear_xgb) + theme_bw() + ggtitle("Feature importance of the gearbox")
+```
+
+As we can see from the plot above, only the first feature "Gear_Bear_Temp_Avg" is the most correlated with the outcome
+Since the model performed well, we will not do a second iteration including more (or less) variables.
+
+## Fixing threshold for the residuals
+
+In order to capture abnormal behavior, we will first fix a threshold based on which we classify the residuals as abnormal. 
+To do so we consider the maximum norm $\ell_{\infty}$ of the residuals in the validation set as the normal behavior boundaries.
+
+To formulate the problem;
+let $n$ be the number of observations
+let $\mathbf{x}$ a vector such that 
+
+$$
+\mathbf{x} = (y_1 - \hat{y}_1, y_2 - \hat{y}_2, \cdots, y_n - \hat{y}_n )
+$$
+The threshold to take would be defined as follows :
+
+$$
+\text {threshold} =  || \mathbf{x} ||_{\infty} = \text{max} (|\mathbf{x}_1|, |\mathbf{x}_2|, \cdots, |\mathbf{x}_n| )
+$$
+
+If the predicted value falls outside said threshold, we would consider the data point as an anomaly.
+
+```{r}
+thresh = max(abs(Y_valid_pred - Y_valid))
+cat("Maximum of the residuals is",thresh)
+```
+
+We can also plot the residual's histogram to see if its normally distributed
+
+```{r}
+res = (Y_valid_pred - Y_valid) %>% as_tibble()
+ggplot(res, aes(x=value)) + geom_histogram(color="white", binwidth = 0.2) + 
+  theme_bw() + ggtitle("Distribution of the residuals of xgboost model on the validation set")
+```
+
+In addition to the threshold, the previous preprocessing showed that the normal behavior boundaries of the gearbox oil temperature average is about 60 degrees.
+Therefore, an additional contraint will be applied : 
+
+$$
+\begin{cases}
+\text{If } y, \hat{y} \in [27,60]  &\rightarrow \text{ normal } \\
+\text{Otherwise} &\rightarrow \text{abnormal}
+\end{cases}
+$$
+
+This can be easily justified by recomputing the minimum and maximum temperatures of what we consider is normal behavior against the minimum and the maximum in the unfiltered data for the variable Gear_Oil_Temp_Avg.
+
+```{r}
+cat("Boundaries of the normal behavior of the Gear_Oil_Temp_Avg are", min(df$Gear_Oil_Temp_Avg), "to", max(df$Gear_Oil_Temp_Avg))
+```
+
+If the predicted anomalies are similar to the ones predicted by the Time Series anomaly detection function on the validation set, we consider the threshold is good and that we are able to predict anomalies. Otherwise, we revisit the thresholding technique until we are satisfied with the results.
+
+## Normal behavior boundaries according to the threshold
+
+To test the algorithm, we will predict an abnormal behavior on the test data (the last 6 months of data) according to the fixed threshold above
+
+```{r, include=FALSE}
+#-- get the test features and the test target as a matrix and a vector
+X_test = df_test %>% 
+  select(-Datetime, -Gear_Oil_Temp_Avg, -Turbine_ID) %>%
+  as.matrix()
+
+Y_test = df_test %>%
+  pull(Gear_Oil_Temp_Avg)
+```
+
+```{r}
+#-- get predictions and compute evaluation metrics
+Y_test_pred = predict(gear_xgb, newdata = X_test)
+test_rmse = rmse(Y_test_pred, Y_test)
+test_mae = mae(Y_test_pred, Y_test)
+test_r2 = cor(Y_test_pred, Y_test)
+
+cat("validation RMSE is", test_rmse, "\n")
+cat("validation MAE is", test_mae, "\n")
+cat("validation R2 is", test_r2, "\n")
+```
+
+We get a higher RMSE and a higher MAE as expected, since the data is unfiltered and contains anomalies.
+To check if the method above would detect anomalies, we can compute the maximum absolute value of the residuals. 
+
+```{r}
+m = max(abs(Y_test_pred - Y_test))
+m
+```
+
+We get significantly higher RMSE of 10.5 compared to the one obtained in the normal behavior model which was about 5.5.
+
+We visualize the results below and add lines according to the thresholds we fixed to represent the normal behavior boundaries
+
+```{r, fig.width=8, fig.height=6, warning=FALSE}
+#-- build data frames of predicted and observed values of train and test data
+g3 = data.frame(observed = df_test$Gear_Oil_Temp_Avg, predicted = Y_test_pred)
+
+#-- plot predicted values against real values and see if its linear
+ggplot(g3, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in validation set Gear_Oil_Temp") + 
+  geom_abline(slope = 1, intercept = 5.6, color = "red") +
+  geom_abline(slope = 1, intercept = -5.6, color = "red") +
+  geom_segment(aes(x=54,xend=65,y=60,yend=60), color = "red") + 
+  geom_segment(aes(x=21,xend=33,y=27,yend=27), color = "red")
+```
+
+According to the defined envelop above, we can compute the residuals of predicted and observed values of the Gear_Oil_Temp_Avg and see the dates which corresponds to values higher than the threshold.
+
+```{r}
+df_pred = df_test %>% 
+  mutate(Predict_Temp = Y_test_pred,
+         Max_Diff = abs(Predict_Temp - Gear_Oil_Temp_Avg))
+
+df_pred_thresh = df_pred %>%
+  filter(Max_Diff > thresh | Gear_Oil_Temp_Avg > 60 | Predict_Temp >60)
+
+cat(dim(df_pred_thresh)[1], "anomalies have been predicted using the threshold method")
+```
+
+We can plot the anomalies predicted as follows:
+
+```{r, fig.width=12, fig.height=5, fig.align='center'}
+p2 = df_pred_thresh %>%
+  select(contains("Temp"), Datetime, -Amb_Temp_Avg, -Predict_Temp) %>%
+  gather(key = "Variables", value = "values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=values, color = Variables)) + 
+  geom_point(alpha = 0.5) + ggtitle("Anomalies predicted by our threshold method") + theme_bw() + 
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  geom_hline(yintercept = 60, color = "red")
+p2
+```
+
+## Detect anomalies using the TS decomposition
+
+If we apply the time series decomposition method on the original data (to maintain the structure of all 2 years of data if there is any seasonality envolved) and get the anomalies that only happened in dates of the test data, we find the following:
+
+```{r}
+#-- load the 2016 and 2017 production data
+data_2016 = read.csv2("wind-farm-1-signals-2016.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+data_2017 = read.csv2("data_wind_prod.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+#-- bind data
+data_total = bind_rows(data_2016,data_2017) %>% 
+  arrange(Datetime) %>% 
+  na.omit() %>%
+  select(names(df)) %>% 
+  as_tibble()
+
+#-- display anomalies using the TS decomposition on all 2 years of data and filter only the test dates
+d = data_total %>%
+  find_my_anomalies_ts() %>%
+  filter(Datetime > "2017-07-02 11:10:00")    #-- to get only the dates of the test set
+
+cat(dim(d)[1], "anomalies have been found in the test set")
+```
+
+We found 1475 anomalies using the Times Series decomposition. We can visualize these points as follows :
+
+```{r, fig.width=12, fig.height=8, fig.align='center'}
+p1 = d %>%
+  select(contains("Temp"), Datetime, -Amb_Temp_Avg) %>%
+  gather(key = "Variables", value = "values", -Datetime) %>% 
+  ggplot(aes(x=Datetime, y=values, color = Variables)) + 
+  geom_point(alpha = 0.5) + ggtitle("Anomalies detected by the time series decomposition method") + theme_bw() + 
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  geom_hline(yintercept = 60, color = "red")
+
+grid.arrange(p1,p2)
+```
+
+```{r}
+diff_anoms = anti_join(d, df_pred, by = c("Datetime", "Turbine_ID"))
+cat("Out of the", dim(d)[1], "anomalies detected by the TS decomposition, only", dim(d)[1]-dim(diff_anoms)[1],"have been detected using xgboost")
+```
+
+## Comparing predicted anomalies with the actual failures
+
+Are they comparable to the actual failure logs?
+
+```{r}
+df_pred_thresh
+```
+
+The answer is no. They are not comparable. Two gearbox failures happened.
+
+Check what the data looks like for these two dates of failures
+
+```{r, fig.width=16, fig.height=6, fig.align='center'}
+df_test %>% 
+  select(Datetime, contains("Temp")) %>%
+  gather(key = "Variable", value = "Values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=Values, col = Variable)) + geom_point(alpha = 0.5) +
+  theme_bw() + ggtitle("Gearbox variables") + 
+  geom_vline(xintercept = failure_total %>% filter(Component == "GEARBOX") %>% pull(Datetime))
+```
+
+## Alternative solutions
+
+Can we re-use the time series decomposition again on the predicted values of the xgboost to predict failures instead of fixing a threshold? 
+
+```{r, fig.align='center', fig.width=16, fig.height=6}
+test = df_pred %>%
+  as_tibble() %>%
+  time_decompose(Predict_Temp, method = "stl", frequency = "auto", trend = "auto", message = FALSE) %>%
+  anomalize(remainder)
+
+test %>% plot_anomalies(alpha_dots = 0.5, size_circles = 3.5, alpha_circles = 0.5) + ggtitle("Anomalies of predicted the gear oil temperature using xgboost")
+```
+
+How many have we captured ? more than 1840 anomalies ! so even more than the original TS decomposition on the observed values!
+
+```{r}
+predicted_anoms = test %>% 
+  filter(anomaly == "Yes") %>% 
+  select(Datetime, observed) %>% 
+  rename(Gear_Oil_Temp_Avg = observed) %>% 
+  as_tibble()
+```
+

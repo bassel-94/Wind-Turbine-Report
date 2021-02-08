@@ -1,0 +1,478 @@
+---
+title: "Data Preprocessing"
+html_notebook: default
+---
+
+# Prerequesites
+
+The aim of the this notebook is to go through some preprocessing steps needed to model the normal behavior of the wind turbines. Once data is cleaned and processed, we proceed by modeling the normal behavior of the turbines using isolation forests.
+
+**NOTE :** The following preprocessing steps are performed on all 2 years of data of all turbines. At the last preprocessing steps, we perform some variable selection to focus on the generator's failures.
+
+Loading libraries, defining data path and loading the data 
+
+```{r, warning = FALSE, echo = FALSE, include=FALSE}
+rm(list=ls())
+library(ensaiWind)
+library(tidyr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(anomalize)
+library(solitude)
+source("functions.R")
+```
+
+Define package path and load 2016 and 2017 data with failures.
+
+```{r}
+#-- load the 2016 and 2017 production data
+data_2016 = read.csv2("wind-farm-1-signals-2016.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+data_2017 = read.csv2("data_wind_prod.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+#-- bind data
+data_total = bind_rows(data_2016,data_2017) %>% 
+  arrange(Datetime) %>% 
+  na.omit()
+
+#-- load the 2016 and 2017 failure data
+failure_2016 = read.csv2(file.path(data_path, "htw-failures-2016.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
+  rename("Turbine_ID" = "ï..Turbine_ID") %>%
+  select(-Timestamp)
+
+failure_2017 = read.csv2(file.path(data_path, "htw-failures-2017.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>% select(-Timestamp)
+
+#-- bind data
+failure_total = rbind(failure_2016, failure_2017) %>% arrange(Datetime)
+```
+
+# Variable selection and train-validation-test strategy
+
+In this section, we will Select the generator and gearbox variables from the total data. To recall, the aim is to model the *normal behavior* on the training data and predict the *abnormal behavior* on the test data. The train-validation-test strategy will be the following :
+
+* Preprocess 1.5 year's worth of of the dataset. (i.e clean it from anomalies and outliers and export it).
+* Split the preprocessed data according to 80-20 ratio (80% for training and 20% for validating the model)
+* Leave out the last 6 months of data to test the model. (The validation dataset will not be processed in any way to maintain its anomalies).
+* Fit a random forest and xgboost models on the training set and validate them using the validation set.
+* Use evaluation metrics such as RMSE, R-squared and Mean Absolute Error (MAE) to select the best model.
+
+Note that the training and testing index are time stamped and hence shuffling the data while sampling is not advised. We will take the data in order.
+
+```{r}
+names(data_total)
+```
+
+For the variable selection at first hand, we will choose the most important generator variables and the the most important gearbox variables.
+The modeling notebook will be split in two:
+
+One section to model the generator's normal behavior by choosing the generator's RPM as a target and one to model the gearbox's normal behavior using the gearbox oil temperature as target (which that indicates the temperature of the wind turbine gearbox system).
+
+For the generator we will choose the following variables : 
+
+Gen_RPM_Avg, <- our target
+Amb_WindSpeed_Avg,
+Prod_LatestAvg_TotActPwr,
+Prod_LatestAvg_TotReactPwr,
+Nac_Temp_Avg,
+Gen_Bear_Temp_Avg,
+Gen_Phase1_Temp_Avg,
+Gen_Phase2_Temp_Avg,
+Gen_Phase3_Temp_Avg
+
+And for the gearbox we choose the following variables :
+
+Gear_Oil_Temp_Avg, <- our target
+Amb_WindSpeed_Avg,
+Prod_LatestAvg_TotActPwr,
+Prod_LatestAvg_TotReactPwr,
+Gear_Bear_Temp_Avg, (Temperature of bearing that holds the rotor with blades)
+Hyd_Oil_Temp_Avg, (Temperature of the oil which cool the gearbox)
+Blds_PitchAngle_Max (Angle of the wind turbine blades)
+
+To that we will add the ambiant temperature as an extra variable that might come in handy later on when testing some combinations.
+
+```{r}
+#-- Variable selection by including all generator AND gearbox variables
+df = data_total %>% 
+  select(Turbine_ID,
+         Datetime,
+         Gen_RPM_Avg,
+         Amb_WindSpeed_Avg,
+         Prod_LatestAvg_TotActPwr,
+         Prod_LatestAvg_TotReactPwr,
+         Nac_Temp_Avg,
+         Gen_Bear_Temp_Avg,
+         Gen_Phase1_Temp_Avg,
+         Gen_Phase2_Temp_Avg,
+         Gen_Phase3_Temp_Avg,
+         Gear_Bear_Temp_Avg,
+         Amb_Temp_Avg,
+         Gear_Oil_Temp_Avg,
+         Amb_WindSpeed_Avg,
+         Hyd_Oil_Temp_Avg,
+         Blds_PitchAngle_Max) %>%
+  arrange(Datetime)
+```
+
+Before any preprocessing steps, we will retain 6 months of data for testing later on. We will not apply any preprocessing on this data. This makes up about 100k observations.
+
+```{r}
+idx = seq(1, floor(dim(df)[1]*0.75))
+df11 = df[idx,]       #-- the data we will clean
+df_test = df[-idx,]   #-- the data we will use for testing later
+```
+
+
+# Outliers detection and Data Cleaning
+
+## Univariate ouliers
+
+A first approach is to detect outliers for each variable in our data set. We thus use the function `outlier.uni` in the file `functions.R`. For each variable, it gives a logical vector indicating whether the i-th entry is an outlier or not.
+
+We consider here that a value is an outlier if it is outside the bounds defined by the quantiles of order 0.5% and 99.5%.
+
+```{r}
+min=0.0005
+max=0.9995
+data_outliers_1=c()
+for (i in 3:ncol(df11)){
+  data_outliers_1=cbind(data_outliers_1,outlier.uni(df11[,i],min = min,max = max))
+}
+
+data_clean_1=df11[!apply(data_outliers_1, MARGIN = 1, any),]
+
+#-- display how many outliers have been removed
+cat("A total of", (dim(df11)[1] - dim(data_clean_1)[1]), "univariate outliers have been detected and removed")
+```
+
+Note that this method may have removed anomalies as well as univariate outliers. The two are calculated according to similar rules and distinguishing the two is a hard manual task.
+
+## Multivariate ouliers
+
+The following method of detection outliers in multidimensions is inspired from the article "Effects of the pre-processing algorithms in fault diagnosis of wind turbines" where we plot the production data as a function of the windspeed and see if there exists some 2 dimensional outliers. 
+
+From the below scatter plot of the production, we can detect a lot of outliers in our data.
+
+Our strategy here will be to fit a model on the production data, and then, fixing a certain threshold, detect a part of the outliers.
+
+Let's take a look at the scatter plot of the production :
+
+```{r, fig.width=10, fig.height=6, warning=FALSE}
+ggplot(data_clean_1) + 
+  aes(x=Amb_WindSpeed_Avg,y=Prod_LatestAvg_TotActPwr,color=Turbine_ID) +
+  geom_point(alpha = 0.3) + theme_bw() +
+  ggtitle("Production data for all turbines")
+```
+
+There are a lot of values for which the production is null. These values are considered as oultiers. The situation where there is absolutely no production cannot happen in a normal behavior setting. Since there are only a few values for which the production is exactly null, we fix a threshold at 1.
+
+```{r}
+data_clean_2 = data_clean_1 %>%
+  filter(Prod_LatestAvg_TotActPwr>1)
+```
+
+
+```{r, fig.width=10, fig.height=6, warning=FALSE}
+ggplot(data_clean_2) + 
+  aes(x=Amb_WindSpeed_Avg,y=Prod_LatestAvg_TotActPwr,color=Turbine_ID) +
+  geom_point(alpha = 0.3) + theme_bw() +
+  ggtitle("Semi filtered production data for all turbines")
+```
+
+
+Now, we fit a logistic model on the production data :
+
+$$ 
+y=\frac{Asym}{(1+\exp((x_{mid}-x)/scal))} 
+$$
+
+where $y$ stands for the production and $x$ for the wind speed.
+
+We use the `nls` function. 
+
+```{r}
+production.mod=nls(Prod_LatestAvg_TotActPwr~SSlogis(Amb_WindSpeed_Avg,Asym,xmid,scal),data = data_clean_2)
+```
+
+We plot the following graphs to estimate visually the goodness of our fit :
+
+```{r,fig.width=10, fig.height=6, warning=FALSE}
+#-- make predictions of the nls model
+production.pred=predict(production.mod,newdata = data_clean_2)
+
+#-- combine observed values and predicted values in a data frame
+df.test=cbind.data.frame(data_clean_2$Amb_WindSpeed_Avg,data_clean_2$Prod_LatestAvg_TotActPwr,production.pred)
+colnames(df.test)=c("Windspeed","Production_power","Predicted_values")
+
+#-- plot results
+ggplot(df.test, aes(x=Windspeed, y=Production_power)) +
+  geom_point(color='red', alpha = 0.3) + 
+  geom_point(aes(y=Predicted_values)) + 
+  theme_bw() + ggtitle("Semi filtered production data and the fitted line")
+```
+
+```{r, fig.width=10, fig.height=6, warning=FALSE}
+#-- plot predicted values against real values and see if its linear
+ggplot(df.test, aes(x=Predicted_values, y=Production_power)) + 
+  geom_point(alpha = 0.3) + theme_bw() + 
+  ggtitle("Observed values against predicted values in production data")
+```
+
+We can quickly see that the fit is pretty good (linear trend between predicted and observed values).
+
+Let's fix a threshold for the residuals and compute them
+
+```{r, fig.width=10, fig.height=6, warning=FALSE}
+#-- fix threshold
+res.thresh=0.5*10^(5)
+
+#-- compute the residuals :
+res=production.pred-data_clean_2$Prod_LatestAvg_TotActPwr
+
+#-- get clean data set by filtering the residuals defined
+data_clean_3 = data_clean_2[abs(res)<=res.thresh,]
+
+#-- plot the results to make sure filtering worked
+ggplot(data_clean_3, aes(x=Amb_WindSpeed_Avg,y=Prod_LatestAvg_TotActPwr,color=Turbine_ID)) +
+  ggtitle("Filtered production data for all turbines in 2 years") +
+  geom_point(alpha = 0.3) +
+  theme_bw()
+```
+
+# Anomaly detection
+
+Some ideas in this analysis were inspired from the article "Wind Fleet Generator Fault Detection via SCADA Alarms and Autoencoders".
+The goal of this analysis is to remove the anomalies detected in the data in order to model the normal behavior of the turbines. 
+
+We will test two anomaly detection methods: Time series decomposition according to "STL" method and Isolation forests.
+
+For each method, we will perform 2 steps : 
+
+- Step 1 : demonstrate the anomaly detection method we will use on a subset of the **original data** and cross check with the actual logs of failures and see if they match. The subset is T06 turbine in 2016. The aim of this step is to demonstrate the reliability of the anomaly detection method.
+
+- Step 2 : If the method is reliable, we detect and remove anomalies by applying the method on the original data and remove its indices from the **preprocessed data** if they have not yet been discarted as univariate outliers in earlier steps. This will only be applied to temperature related data.
+
+**IMPORTANT NOTE 1:** It is computationally very heavy (and might crash the session) to plot anomalies of all variables. Therefore, we will demonstrate step 1 on a single variable; Gen_Phase2_Temp_Avg and a single turbine T06 for 2016.
+
+## Method 1 : Time Series decomposition
+
+In this method, we will use the package *anomalize* to detect anomalies after performing a “Seasonal and Trend decomposition using Loess”, or STL for short. This method allows for estimating nonlinear relationships in the time series. We then use the function anomalize on the remainder after the time series decomposition and display the detected anomalies with a plot. However, analyzing the trend and seasonality is beyond the scope of this project and therefore will not be performed.
+
+### Step 1 : Demonstratign anomaly detection on a subset of the original data
+
+In the notebook EDA, we have visualized the anomalies of T06's generator in 2016. In total, 5 failures occured in this period out of which only the third and the fourth failures registered are true positives, that is failures coherent with abnormally high temperature readings. Said failures happened in 2016-09-04 and 2016-10-02.
+They will be our targets (i.e. can we identify them using an anomaly detection function?)
+
+```{r}
+#-- display failure dates of T06's generator 
+f_2016 = failure_2016 %>% 
+  filter(Turbine_ID == "T06", Component == "GENERATOR") %>% 
+  arrange(Datetime)
+f_2016
+```
+
+```{r, warnings = FALSE, fig.align='center', fig.width=15, fig.height=12}
+#-- filter 2016 and T06 and do time decomposition. Recover and plot anomalies
+d = df11 %>%
+  as_tibble() %>%
+  filter(Turbine_ID == "T06", Datetime < "2017-01-01") %>%
+  time_decompose(Gen_Phase2_Temp_Avg, method = "stl", frequency = "auto", trend = "auto", message = FALSE) %>%
+  anomalize(remainder)
+
+d %>% plot_anomaly_decomposition(alpha_dots = 0.5) + ggtitle("Anomalies of T06's Gen_Phase2_Temp_Avg in 2016")
+```
+
+Indeed, as confirmed previously when analyzing the temperature plots, the data points representing temperatures above 150 degrees in all temperature sensors are considered as anomalies.
+Now we can display the failure dates captured by the function and cross check them with the target failures (third and fourth failures) logged by the maintenance technicians/engineers.
+
+```{r}
+anom = d %>%
+  time_recompose() %>%
+  filter(anomaly == 'Yes')
+
+df11 %>%
+  select(Turbine_ID, Datetime, Gen_Bear_Temp_Avg, Gen_Phase1_Temp_Avg, Gen_Phase2_Temp_Avg, Gen_Phase3_Temp_Avg) %>%
+  filter(Turbine_ID == "T06",
+         Datetime %in% anom$Datetime,
+         Datetime > "2016-09-02" & Datetime < "2016-10-25") %>% 
+  arrange(Datetime)
+```
+
+Using the third and fourth failures as targets, we were able to capture the anomalies two days in advance for both of them.
+
+**Conclusion :**
+
+* We have been successfully able to identify Anomalies/failures that were the third and fourth failure logs that occured in 2016-09-04 and 2016-10-20.
+* We were able to capture the anomalies two or three days in advance.
+* The rogue temperature readings that are above 150 degrees previously seen in the EDA have been detected as anomalies using this function, but were not considered as failures in the logs. They may have been a false negative.
+* Anomalies and outliers are mixed using this approach. We will remove them both following the same steps from the training data. 
+
+### Step 2 : Anomaly detection on the whole data
+
+Now that the first step of this method is validated, we will use it on all the dataset
+
+```{r}
+#-- data needs to be in tibble format
+anoms = df11 %>% 
+  as_tibble() %>%
+  find_my_anomalies_ts() %>%
+  arrange(Turbine_ID, Datetime)
+
+#-- display the detected anomalies on the total data
+anoms %>% arrange(Datetime) %>% select(Turbine_ID, Datetime, contains("Temp"))
+```
+
+Now that we detected 12355 anomalies in the original data, we will cross check with the logs to see if we were able to capture them. 
+We will also plot the data against the failures dates registered to see what anomalies the function detected.
+
+```{r}
+f_total = failure_total %>% filter(Component == "GENERATOR" | Component == "GEARBOX")
+f_total
+```
+
+```{r, fig.align='center', fig.width=15, fig.height=5, warning=FALSE}
+#-- get temperature variables in the failure periods
+var_to_plot = df11 %>%
+  select(Turbine_ID, Datetime, contains("Temp")) %>%
+  filter(Datetime < "2017-08-21" & Datetime > "2016-02-01") %>%
+  gather(key = "Temp_Variable", value = "Value", -Turbine_ID, -Datetime)
+
+#-- plot the variables along with lines to specify failure dates
+library(scales)
+ggplot(var_to_plot, aes(x = Datetime, y = Value, color = Temp_Variable )) + 
+  geom_point(alpha = 0.3) + 
+  theme_bw() + 
+  geom_vline(xintercept = f_total$Datetime, size=1) +
+  ggtitle("Generator variables along with failure dates") +
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Indeed, we notice that we were able to capture all the true positive failures using this method and in some cases, days in advances. Some abnormal temperature observations have also been detected as anomalies but they were not registered in the logs.
+
+## Method 2 : Isolation Forest
+
+Following the same logic above, we will demonstrate the workings of an isolation forest on the same subset of the data as in step 1 method 1 to see if we are able to capture the anomalies. Bear in mind that this a probabilistic model. Therefore, displaying the anomalies predicted by the isolation forest boils down to predicting probabilities of classifying an observation as an anomaly based on the model's parameters. 
+
+The model's ability to classify anomalies is captured by its R2 out of bag score. Since computing probabilities from the fitted models can result in an expensive computational task, we will evaluate model's performance based on its R2 score.
+
+```{r}
+#-- same filtering as step 1 for method 1
+df11_if_subset = df11 %>% 
+  filter(Turbine_ID=="T06", Datetime < "2017-01-01") %>%
+  select(Gen_Phase2_Temp_Avg, Datetime, Turbine_ID)
+
+#-- same filtering as step 2 for method 1
+df11_if = df11 %>%
+  select(Turbine_ID, Datetime, contains("Temp"))
+
+#-- fit models to both data frames
+model.if.1 = isolation_forest(df11_if_subset)
+model.if.2 = isolation_forest(df11_if)
+
+#-- compare 
+model.if.1$forest$r.squared
+model.if.2$forest$r.squared
+```
+
+Interestingly, we get a low 51% score when considering only the variable Gen_Phase2_Temp_Avg but a high 91% score when considering all the temperature variables. To compare this method to the time series decomposition, we will repeat the computational tasks considered in step 2. In other words, we will use the model to compute anomaly scores and display their corresponding dates to cross check with the logs.
+
+```{r}
+#-- predict anomalies on the same
+df11_if$pred = predict(model.if.2, df11_if, type = "anomaly_score") %>% arrange(Datetime)
+```
+
+```{r}
+#-- make classifications based on the probability of an abnormal behavior
+df11_if$behavior = as.factor(ifelse(df11_if$pred >=0.63, "unhealthy", "healthy"))
+
+#-- get unhealthy predicted values
+df11_if %>% filter(behavior == "unhealthy") %>% arrange(Datetime)
+```
+
+A total of 140 anomalies have been detected according to a score higher than 63% and all true positive failures have been detected accurately and days in advance. 
+
+## Analysis of both methods
+
+Both methods show similar results and offer a significant insight regarding the detection of abnormal behavior that would be classified as an anomaly (or a failure in the case of the logs). Both methods allowed us to detect the true positive failures 2 days in advance. 
+
+Interestingly, in some days, extreme temperature values have been recorded three consequtive days from 2016-11-02 to 2016-11-04 with readings clocked at 205 degrees but they have not been registered as an anomaly. We can visualize them in the following plot below. Such readings may be considered as outliers since no failures have been logged for said dates or a false negative. 
+
+```{r, fig.align='center', fig.width=15, fig.height=5, warning=FALSE}
+#-- get temperature variables in the failure periods
+var_to_plot_2 = df11 %>%
+  select(Turbine_ID, Datetime, contains("Temp")) %>%
+  filter(Datetime < "2016-11-05" & Datetime > "2016-11-01 16:00:00") %>%
+  gather(key = "Temp_Variable", value = "Value", -Turbine_ID, -Datetime)
+
+#-- plot the variables along with lines to specify failure dates
+library(scales)
+ggplot(var_to_plot_2, aes(x = Datetime, y = Value, color = Temp_Variable )) + 
+  geom_point(alpha = 0.3) + 
+  theme_bw() +
+  ggtitle("Abnormal generator variables") +
+  scale_x_datetime(date_labels = "%m-%d %H", breaks = date_breaks("4 hours")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The advantage when using an isolation forest is its ability to provide an anomaly score based on which we can determine the level of seriousness of the anomaly detected. In other words, this would help define the barrier between a mere outlier or an actual failure that is about to happen. In some case, a high 71% anomaly score was acheived when all generator related variables skyrocketed at 205 degrees. This indeed indicates that the model was able to detect any rogue temperature value and classify it as an abnormal behavior based on the threshold score that we fixed.
+
+In contrast, the time series decomposition approach offers rich insight on how the series behaved by trend and seasonality. By extension, a time series decomposition returns a lower number of anomalies by taking into account seasonality effects. The average components' temperatures in the summer is naturally higher than the one during cold winters. The difference in seasonal temperatures in France may reach 40 degrees in some areas. Therefore, the sound approach would be to continue moving forward with the time series decomposition method as our main anomaly detection technique. In addition, such approach allows a deeper level of time series parameter tuning as it was designed to do so. 
+
+```{r}
+df_anoms = anoms %>% arrange(Datetime)
+df11_t = data_clean_3 %>% as_tibble() %>% arrange(Datetime)
+
+#-- First make sure we get 136 anomalies if we filter the anomalies from the original data df11
+test_1 = anti_join(df11, df_anoms, by = c("Datetime", "Turbine_ID"))
+dim(df11)[1]-dim(test_1)[1]
+
+#-- filter the remaining anomaly dates from the semi-cleaned data. Only one row left!
+df11_final = anti_join(df11_t, df_anoms, by = c("Datetime", "Turbine_ID"))
+dim(df11_t)[1] - dim(df11_final)[1]
+```
+
+# Plot final results
+
+In the end, 33.38% of the total data have been filtered from the original data. Although it may seem like a lot, the aim is to model the normal behavior without outliers or anomalies.
+
+```{r}
+#-- how many values have been filtered out in the end? 
+cat( round(((dim(df11)[1] - dim(df11_final)[1])/dim(df11)[1])*100,2), "% of the original data have been filtered")
+```
+
+```{r, fig.align='center', fig.width=15, fig.height=5, warning=FALSE}
+#-- plot some variables of interest after scaling and check if we still have outliers 
+#-- (remember we only removed anomalies from temp related variables)
+df11_final %>%
+  select(Turbine_ID, 
+         Datetime, 
+         contains("Temp")) %>%
+  gather(key = "Vars", value = "Temp_Values", -Datetime, -Turbine_ID) %>% 
+  ggplot(aes(x= Datetime, y = Temp_Values, color = Vars)) + 
+  geom_point(alpha = 0.1) + theme_bw() +
+  ggtitle("Filtered temperature data") +
+  scale_x_datetime(date_labels = "%y-%m", breaks = date_breaks("1 month")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+We can see that all outliers and anomalies have been removed from the data after preprocessing. No rogue temperature observation far from each variable's mean.
+We won't show a box plot to avoid recalculating outliers based on the new means.
+
+After all the preprocessing steps are done, we will save the dataframe to be able to use it in the next notebook for modeling normal behavior
+
+```{r}
+#-- write a compressed csv of the results
+#write.csv(df11_final, file=gzfile("filtered_data.csv.gz"), row.names = FALSE)
+#write.csv(df_test, file=gzfile("unfiltered_data.csv.gz"), row.names = FALSE)
+```
+

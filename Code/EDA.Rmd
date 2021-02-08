@@ -1,0 +1,163 @@
+---
+title: "Exploratory Data Analysis"
+html_notebook: default
+---
+
+This notebook is dedicated for exploratory data analysis of the SCADA data. 
+
+# Prerequesites
+
+Loading libraries, defining data path and loading the data 
+
+```{r, warning = FALSE, echo = FALSE, include=FALSE}
+rm(list=ls())
+library(ensaiWind)
+library(tidyr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(RColorBrewer)
+source("functions.R")
+```
+
+Define package path and load 2016 and 2017 data with failures
+
+```{r}
+#-- define data path in the ensai library
+data_path = file.path(system.file(package = "ensaiWind"), "extdata")
+
+#-- load the 2016 and 2017 production data
+data_2016 = read.csv2(file.path(data_path, "wind-farm-1-signals-2016.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+data_2017 = read.csv2(file.path(data_path, "data_wind_prod.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+
+data_total = bind_rows(data_2016,data_2017) %>% 
+  arrange(Datetime) %>% 
+  na.omit()
+
+#-- load the 2016 and 2017 failure data
+failure_2016 = read.csv2(file.path(data_path, "htw-failures-2016.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
+  rename("Turbine_ID" = "ï..Turbine_ID") %>%
+  select(-Timestamp)
+
+failure_2017 = read.csv2(file.path(data_path, "htw-failures-2017.csv"), header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>% select(-Timestamp)
+
+#-- bind data
+failure_total = rbind(failure_2016, failure_2017) %>% arrange(Datetime)
+```
+
+# Data visualization
+
+## Visualizing production data
+
+```{r, fig.align='center', fig.width=14, fig.height=8, warning=FALSE}
+plot_by_month(data_2016, "Amb_WindSpeed_Avg","Prod_LatestAvg_TotActPwr")
+```
+
+Conclusion : We see that the theoretical curve of the power production (perfect S shape) is reasonably accurate when compared to real production data. This entails normal behavior of the turbine. However, we notice some rogue points that seem like two dimensional outliers. For example, a windspeed of about 10m/s we should get a power production data on the S curve. The fact that it is not indicates that either the whole turbine was down for some other related reasons or that it is in fact a two dimensional outlier.
+
+## Exploring missing values in timestamp
+
+In order to visualize missing values in a timestamp, we will first filter the data to get only variables in T06 to make the visualization easier.
+Then we get minimum and maximum of the timestamp and fill them. The name of the data frame will be as follows : 
+df and the number of variables it contains *(i.e. df11 for 11 variables)*
+
+```{r}
+#-- Variable selection by including all generator variables in 2016 data
+df11 = data_total %>% 
+  select(Turbine_ID,
+         Datetime,
+         Gen_RPM_Avg,
+         Amb_WindSpeed_Avg,
+         Prod_LatestAvg_TotActPwr,
+         Prod_LatestAvg_TotReactPwr,
+         Nac_Temp_Avg,
+         Gen_Bear_Temp_Avg,
+         Gen_Phase1_Temp_Avg,
+         Gen_Phase2_Temp_Avg,
+         Gen_Phase3_Temp_Avg) %>% 
+  filter(Turbine_ID == "T06") %>%
+  droplevels() %>%
+  arrange(Datetime) %>%
+  as_tibble()
+
+df11_full = df11 %>% fill_my_na()  #-- function to fill datetime with regular intervals of 10 mins
+
+#-- display head of dataframe
+head(df11_full)
+```
+
+We notice that we introduced missing values when we compared the observed datetime sequence against the theoretical one created in the function fill_my_na(). Therefore, we will visualize individual variables to look at the time-gap and check for outliers in a univariate setting.
+
+## Visualize generator variables individually
+
+Plotting generator variables in a univariate setting, as a timeseries, and checking for outliers in the scatter plots (visually).
+
+```{r, fig.align='center', fig.width=15, fig.height=5, warning=FALSE}
+n = names(df11_full[,-c(1,2)])
+for (i in seq_along(n)){
+  print(
+    ggplot(df11_full, aes_string(x = "Datetime_full", y = paste0(n[i]))) +
+      geom_point(alpha = 0.2) + theme_bw() + 
+      ggtitle("Curve of variable ", paste0(n[i]))
+  )
+}
+```
+
+Indeed, we notice that there is a time gap in the month of August. We will display it in a data frame. We know that we introduced NA's earlier so we should be able to see the NA's in the missing time stamp. The missing data is between 2016-07-10 and 2016-07-20. If we zoom in on that period, we get the following plot.
+
+```{r, fig.align='center', fig.width=15, fig.height=5, warning=FALSE}
+#-- visualize the missing period in the dataframe
+missing = filter(df11_full, Datetime_full >= "2016-06-10 20:30:00" & Datetime_full <= "2016-08-20 09:50:00")
+
+ggplot(missing, aes(x = Datetime_full, y = Gen_Bear_Temp_Avg )) + 
+  geom_point(alpha = 0.5) + theme_bw() +
+  ggtitle("Gap in the variable Gen_Bear_Temp_Avg")
+```
+
+We can also see from the scatter plots above that we have some outliers in one dimensions. *Some temperatures are 200 degrees*.
+In the notebook preprocessing, we continue by exploring and dealing with the outliers mentioned above (in 1-dimension as well as in multidimensions).
+
+## Visualize failure dates
+
+Visualizing generator variables along with its failure dates can give some insight on how failures are detected and why. For example, does the failure described as "replacement of generator" actually entails some abnormal temperature behavior or is it just maintenance work?
+
+```{r}
+#-- first display the failure logs of T06's generator
+f_2016 = failure_total %>%
+  filter(Turbine_ID == "T06", Component == "GENERATOR") %>%
+  arrange(Datetime)
+f_2016
+```
+
+
+```{r, fig.align='center', fig.width=15, fig.height=5, warning=FALSE}
+#-- get temperature variables in the failure periods
+var_to_plot = df11 %>%
+  select(Turbine_ID, Datetime, Gen_Bear_Temp_Avg, Gen_Phase1_Temp_Avg, Gen_Phase2_Temp_Avg, Gen_Phase3_Temp_Avg) %>%
+  filter(Datetime < "2016-12-01" & Datetime > "2016-07-01") %>%
+  gather(key = "Temp_Variable", value = "Value", -Turbine_ID, -Datetime)
+
+#-- plot the variables along with lines to specify failure dates
+ggplot(var_to_plot, aes(x = Datetime, y = Value, color = Temp_Variable )) + 
+  geom_point(alpha = 0.3) + 
+  theme_bw() + 
+  geom_vline(xintercept = f_2016$Datetime, size=1) +
+  ggtitle("Generator variables along with failure dates")
+```
+
+
+## Conclusion :
+
+- We notice that not all generator failures indicate abnormal temperature behavior which is important to the analysis and failure prediction later on.
+- In the missing 10 day period, the generator has been replaced on 2016-07-11 and the turbine remained un-operational for a few days after. This should not be considered a failure but rather a maintenance work.
+- Out of the 5 failures that heppened in turbine T06's generator, only two are reliable; the third and the fourth failures for they show abnormal temperature behaviors (up to 200 degrees).
+- Some rogue temperature measurement that were up to 200 degrees for all 4 variables were not discarted as a failure in the logs. We may consider them as outliers.

@@ -1,0 +1,373 @@
+---
+title: "Modeling Normal Behavior"
+output: pdf_document
+html_notebook: default
+---
+
+# Prerequesites
+
+The aim of the this notebook is to go through some modeling techniques in order classify unhealthy operation of the wind turbines.
+The model evaluation technique will be based on the RMSE of the test set. The steps we will go through in this notebook are represented below: 
+
+* Read and split the clean data according to 70-30 ratio (70% for training and 30% for testing)
+* Fit a random forest model on the training set and test the model on the test set.
+* Use evaluation metrics such as RMSE and R-squared to help determine the best model (and do feature selection).
+* Once the model is trained and tested, we validate the model by predicting the failures on the un-processed data.
+
+- The first approach is to use an isolation forest on a portion of the total data with without any preprocessing. The aim of this approach is to see whether we are able to detect anomalies/failures in the original data.
+
+- The second approach is to model normal behavior of turbines using the training data from the previous notebook and predict failure values in the test data (that is un-filtered). 
+The target variable will be Gen_RPM_Avg and both train and test data will be normalized.
+
+```{r, warning = FALSE, echo = FALSE, include=FALSE}
+rm(list=ls())
+library(ensaiWind)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(lubridate)
+library(ggplot2)
+library(anomalize)
+library(solitude)
+library(ranger)
+library(splines)
+library(gam)
+library(vip)
+library(Metrics)
+source("functions.R")
+```
+
+```{r, warning = FALSE, echo = FALSE, include=FALSE}
+# #-- define data path in the ensai library
+# data_path = file.path(system.file(package = "ensaiWind"), "extdata")
+# 
+# #-- load the 2016 and 2017 production data
+# data_2016 = read.csv2(file.path(data_path, "wind-farm-1-signals-2016.csv"), header = T, dec = ".", sep = ";") %>%
+#   mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+#          Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+# 
+# data_2017 = read.csv2(file.path(data_path, "data_wind_prod.csv"), header = T, dec = ".", sep = ";") %>%
+#   mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+#          Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+# 
+# #-- bind data
+# data_total = bind_rows(data_2016,data_2017) %>% 
+#   arrange(Datetime) %>% 
+#   na.omit()
+
+#-- load the 2016 and 2017 failure data
+# failure_2016 = read.csv2(file.path(data_path, "htw-failures-2016.csv"), header = T, dec = ".", sep = ";") %>%
+#   mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+#          Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
+#   rename("Turbine_ID" = "ï..Turbine_ID") %>%
+#   select(-Timestamp)
+# 
+# failure_2017 = read.csv2(file.path(data_path, "htw-failures-2017.csv"), header = T, dec = ".", sep = ";") %>%
+#   mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+#          Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>% select(-Timestamp)
+# 
+# #-- bind data
+# failure_total = rbind(failure_2016, failure_2017) %>% arrange(Datetime)
+
+#-- load the data using readr library (very practical for reading .csv.gz)
+df11_clean = read_csv("filtered_data.csv.gz") %>% mutate(Turbine_ID = as.factor(Turbine_ID))
+```
+
+```{r}
+#-- test train split without shuffeling
+idx_train = seq(1:floor((dim(df11_clean)[1])*0.70))
+length(idx_train)
+df11_train = df11_clean[idx_train,]
+df11_test = df11_clean[-idx_train,]
+```
+
+# Regression models for normal behavior
+
+## GAM
+
+### Individual behavior of explanatory variables 
+
+First of all, we try to see how the Generator RPM behaves according to each covariate individually. To avoid scaling problems when plotting, we will scale all the parameters.
+We rearrange first the data frame for the plot :
+
+```{r, fig.align='center', fig.width=14, fig.height=8, warning=FALSE}
+df_model_plot = df11_train %>% 
+  scale_my_df() %>%
+  select(-Datetime, -Turbine_ID) %>%
+  gather (key="variable",value="value",-Gen_RPM_Avg) 
+
+#-- plot grid of variables
+ggplot(df_model_plot, aes(x = value, y = Gen_RPM_Avg)) +
+  geom_point(alpha = 0.3) +
+  facet_wrap(~variable) + 
+  ggtitle("Explanatory variables as a function of the target variable Gen_RPM_Avg") + 
+  theme_bw()
+```
+
+Before fitting a GAM model, we will try to fit a model for the wind speed. It is not clear how other covariates interact with the target variable.
+
+```{r}
+df_model = df11_train %>% select(-Datetime, -Turbine_ID)
+gam.windspeed = gam(Gen_RPM_Avg~bs(Amb_WindSpeed_Avg,knots = c(-0.5,0,0.5)),data=df_model)
+```
+
+```{r, fig.width=10, fig.height=6, warning=FALSE}
+pred.gam.windspeed<-predict(gam.windspeed,newdata = df_model)
+
+df.gam<-cbind.data.frame(df_model$Amb_WindSpeed_Avg,df_model$Gen_RPM_Avg,pred.gam.windspeed)
+colnames(df.gam)<-c("v1","v2","v3")
+
+ggplot(df.gam)+aes(x=v1,y=v2)+
+  geom_point(aes(color='red'), alpha = 0.2)+
+  geom_point(aes(y=v3))+
+  theme_bw()
+```
+
+## GAM model
+
+```{r}
+gam.mod<-gam(formula = Gen_RPM_Avg~bs(Amb_WindSpeed_Avg,knots = c(5,7.5,10))+.,
+             data = df_model,
+             family=gaussian)
+pred.gam<-predict(gam.mod,newdata = df_model)
+```
+
+```{r, fig.width=10, fig.height=6, warning=FALSE}
+plot(y=pred.gam,x=df_model$Gen_RPM_Avg)
+abline(a=0,b=1,col='red')
+```
+
+This is obviously not good, but we can wonder if there are not other outliers in the data set :
+
+```{r, fig.width=10, fig.height=6, warning=FALSE}
+ggplot(df11_train)+
+  aes(x=Amb_WindSpeed_Avg,y=Gen_RPM_Avg,color=Turbine_ID)+
+  geom_point(alpha = 0.3) + theme_bw()
+```
+
+A GAM model seems very hard to fit on these data. Indeed, it is difficult to find a good fit for each explanatory variable.
+
+## Random Forest
+
+In this iteration, we use the random forest to model normal behavior. 
+
+* First iteration will be for a simple out of the box random forest model (only on generator related variables).
+* Second iteration we try to improve the model by doing feature importance
+* Third iteration will be testing different combinations of variables
+
+### First iteration
+
+Fit a random forest model on the generator's variables
+
+```{r}
+#-- Fit a parallelized random forest model (it takes too long without parallelization)
+library(parallel)
+c = detectCores()
+
+#-- reminder on the names of the variables
+names(df11_train)
+
+#-- fit model on 6 cores
+rf = ranger(Gen_RPM_Avg ~ ., 
+            data = df11_train %>% select(-Datetime, -Gear_Bear_Temp_Avg),
+            num.threads = c-1)
+rf
+```
+
+An out of bag R squared score of 93.5% is obtained using the preprocessed data. This an indicator of how well we were able to model a normal behavior using the selected temperature variables as input and the generator speed as output.
+
+```{r}
+#-- predict the test values and the train values
+y_pred_test = predict(rf, data = df11_test %>% select(-Datetime,))$predictions
+y_pred_train = predict(rf, data = df11_train %>% select(-Datetime))$predictions
+```
+
+```{r, fig.width=12, fig.height=6, warning=FALSE}
+#-- build data frames of predicted and observed values of train and test data
+g1 = data.frame(observed = df11_test$Gen_RPM_Avg, predicted = y_pred_test)
+g2 = data.frame(observed = df11_train$Gen_RPM_Avg, predicted = y_pred_train)
+
+#-- plot predicted values against real values and see if its linear
+library(gridExtra)
+
+p1 = ggplot(g1, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.1) + theme_bw() +
+  ggtitle("Observed values against predicted values in [test] production data") + 
+  geom_smooth(method='lm', formula= y~x, color = "blue") +
+  geom_line(aes(y = predicted), size = 1, color = "red", linetype = "dashed")
+
+p2 = ggplot(g2, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.1) + theme_bw() +
+  ggtitle("Observed values against predicted values in [train] production data")+ 
+  geom_smooth(method='lm', formula= y~x, color = "blue") +
+  geom_line(aes(y = predicted), size = 1, color = "red", linetype = "dashed")
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+```{r}
+#-- compute the RMSE on the train and the test set
+error_1 = rmse(df11_test$Gen_RPM_Avg, y_pred_test)
+error_0 = rmse(df11_train$Gen_RPM_Avg, y_pred_train)
+cat("RMSE on the train set is", error_0, "\n")
+cat("RMSE on the test set is", error_1)
+```
+
+The above plots indicate a good linear fit for training data indicating good normal behavior of wind turbines. Some irregularities in low RPM speeds are causing high deviations from the linear fit in the test set. However, most of the points are focalised in speeds above 1200 RPM which are well represented in the model. Hence, we get a good RMSE and R2 squared for the test set.
+
+### Second iteration
+
+Add the gear bearing temperature variable and computing feature importance and feature effects for the model in iteration 1. To do so, we will use with the impurity-based measure of feature importance where we base feature importance on the average total reduction of the loss function for a given feature across all trees.
+
+Furthermore, since we have many categorical features with a varying number of levels (i.e Turbine_ID), sampling with replacement can lead to biased variable split selection. Consequently, we will set the option replace = FALSE to do sampling without replacement which would, in theory, provides a less biased use of all levels across the trees in the random forest.
+
+**IMPORTANT NOTE:** The following model took about 8 minutes to train without parallelization
+
+```{r}
+rf_full = ranger(
+  formula = Gen_RPM_Avg ~ ., 
+  data = df11_train %>% select(-Datetime), 
+  importance = "impurity",
+  replace = FALSE,
+  num.threads = c-1
+  )
+rf_full
+```
+
+```{r, fig.width=10, fig.height=4, warning=FALSE, fig.align='center'}
+vip::vip(rf_full) + theme_bw() + ggtitle("Feature Importance plot")
+```
+
+We indeed notice slight improvement by adding the gear bearing temperature variable.
+We also notice that some variables are not highly correlated with the target variable according to the feature importance plot above. Therefore, we will fit a model using the first 5 variables and compute the RMSE and the R2 score again. 
+
+```{r}
+var_to_fit = c("Gen_RPM_Avg", "Amb_WindSpeed_Avg", "Prod_LatestAvg_TotActPwr", "Prod_LatestAvg_TotReactPwr", "Gear_Bear_Temp_Avg", "Gen_Phase1_Temp_Avg")
+rf_2 = ranger(
+  formula = Gen_RPM_Avg ~ ., 
+  data = df11_train %>% select(var_to_fit),
+  num.threads = c-1)
+rf_2
+```
+
+Calculating RMSE on the test set on the reduced model
+
+```{r}
+#-- predict the test values and the train values
+y_pred_test.2 = predict(rf_2, data = df11_test %>% select(var_to_fit))$predictions
+y_pred_train.2 = predict(rf_2, data = df11_train %>% select(var_to_fit))$predictions
+
+#-- compute the RMSE on the reduced train and the reduced test set
+error_1 = rmse(df11_test$Gen_RPM_Avg, y_pred_test.2)
+error_0 = rmse(df11_train$Gen_RPM_Avg, y_pred_train.2)
+cat("RMSE on the reduced train set is", error_0, "\n")
+cat("RMSE on the reduced test set is", error_1)
+```
+
+
+After feature selection using feature importance, we get a 93.5% R2 and approximately the same RMSE (about 60 on the test set) **AND** we have reduced the model complexity by half.
+
+### Third Iteration
+
+Testing different combinations of variables
+
+* Gear bearing temp. & Generator bearing temp.
+* Gear bearing temp. & Ambient temp.
+* Gear bearing temp. & Nacelle temp.
+* Nacelle temp. & Ambient temp
+
+```{r}
+#-- create a new data frame with the new variables
+df11_comb = df11_clean %>% 
+  mutate(Gear_Bear_Gen_Bear = Gear_Bear_Temp_Avg - Gen_Bear_Temp_Avg,
+         Gear_Bear_Amb_Temp = Gear_Bear_Temp_Avg - Amb_Temp_Avg,
+         Gear_Bear_Nac_Temp = Gear_Bear_Temp_Avg - Nac_Temp_Avg)
+
+#-- new test train split 
+idx_train.2 = seq(1:floor((dim(df11_comb)[1])*0.70))
+df11_train_c = df11_comb[idx_train.2,]
+df11_test_c = df11_comb[-idx_train.2,]
+```
+
+```{r}
+#-- combine the variable previously identified with the newly created ones
+var_comb = c("Gen_RPM_Avg", 
+             "Amb_WindSpeed_Avg", 
+             "Prod_LatestAvg_TotActPwr", 
+             "Prod_LatestAvg_TotReactPwr", 
+             "Gear_Bear_Temp_Avg", 
+             "Gen_Phase1_Temp_Avg",
+             "Gear_Bear_Gen_Bear",
+             "Gear_Bear_Amb_Temp",
+             "Gear_Bear_Nac_Temp")
+
+rf_3 = ranger(
+  formula = Gen_RPM_Avg ~ ., 
+  data = df11_train_c %>% select(var_comb),
+  importance = "impurity")
+rf_3
+```
+
+```{r}
+#-- predict the test values and the train values
+y_pred_test.3 = predict(rf_3, data = df11_test_c %>% select(var_comb))$predictions
+y_pred_train.3 = predict(rf_3, data = df11_train_c %>% select(var_comb))$predictions
+
+#-- compute the RMSE on the combination train and the combination test set
+error_1 = rmse(df11_test_c$Gen_RPM_Avg, y_pred_test.3)
+error_0 = rmse(df11_train_c$Gen_RPM_Avg, y_pred_train.3)
+cat("RMSE on the reduced train set is", error_0, "\n")
+cat("RMSE on the reduced test set is", error_1)
+```
+
+New feature importance plot that shows the new combination's importance to the model
+
+```{r, fig.width=10, fig.height=4, warning=FALSE, fig.align='center'}
+vip::vip(rf_3) + theme_bw() + ggtitle("Feature Importance plot with combinations")
+```
+
+## Conclusion
+
+RMSE of 59.7 for the following variables : 
+
+Gen_RPM_Avg
+Amb_WindSpeed_Avg
+Prod_LatestAvg_TotActPwr
+Prod_LatestAvg_TotReactPwr
+Nac_Temp_Avg
+Gen_Bear_Temp_Avg
+Gen_Phase1_Temp_Avg
+Gen_Phase2_Temp_Avg
+Gen_Phase3_Temp_Avg
+Amb_Temp_Avg
+
+RMSE of 60.2 for the following variables : (identified as the most important 5 variables)
+
+Gen_RPM_Avg
+Amb_WindSpeed_Avg
+Prod_LatestAvg_TotActPwr
+Prod_LatestAvg_TotReactPwr
+Gear_Bear_Temp_Avg
+Gen_Phase1_Temp_Avg
+
+RMSE of 56,7 for the following variables (added three combinations of variables)
+
+Gen_RPM_Avg
+Amb_WindSpeed_Avg
+Prod_LatestAvg_TotActPwr
+Prod_LatestAvg_TotReactPwr
+Gear_Bear_Temp_Avg
+Gen_Phase1_Temp_Avg
+**Gear_Bear_Gen_Bear**
+**Gear_Bear_Amb_Temp**
+**Gear_Bear_Nac_Temp**
+
+The last three combinations definitely helped improving the model.
+
+
+# Potential next steps : 
+
+- Get a confidence interval beyond which we consider a point as an anomaly.
+- Classify the behavior of the turbines in a new column called "behavior" containing the classes "healthy" and "unhealthy".
+- Filter the "unhealthy" results and cross check the anomalies detected in the regression model with failures that might have been registered in the logs.
+Have we been able to predict a failure accurately? if yes, can we predict it in advance? 
