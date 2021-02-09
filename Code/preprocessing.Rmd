@@ -27,32 +27,15 @@ Define package path and load 2016 and 2017 data with failures.
 
 ```{r}
 #-- load the 2016 and 2017 production data
-data_2016 = read.csv2("wind-farm-1-signals-2016.csv", header = T, dec = ".", sep = ";") %>%
-  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
-         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
 
-data_2017 = read.csv2("data_wind_prod.csv", header = T, dec = ".", sep = ";") %>%
-  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
-         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris"))
+df = read_csv("original_data.csv.gz") %>%
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  #filter(Turbine_ID == "T06") %>%
+  as_tibble()
 
-#-- bind data
-data_total = bind_rows(data_2016,data_2017) %>% 
-  arrange(Datetime) %>% 
-  na.omit()
-
-#-- load the 2016 and 2017 failure data
-failure_2016 = read.csv2(file.path(data_path, "htw-failures-2016.csv"), header = T, dec = ".", sep = ";") %>%
-  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
-         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
-  rename("Turbine_ID" = "ï..Turbine_ID") %>%
-  select(-Timestamp)
-
-failure_2017 = read.csv2(file.path(data_path, "htw-failures-2017.csv"), header = T, dec = ".", sep = ";") %>%
-  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
-         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>% select(-Timestamp)
-
-#-- bind data
-failure_total = rbind(failure_2016, failure_2017) %>% arrange(Datetime)
+failure_total = read_csv("failures.csv.gz") %>%
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  as_tibble()
 ```
 
 # Variable selection and train-validation-test strategy
@@ -68,7 +51,7 @@ In this section, we will Select the generator and gearbox variables from the tot
 Note that the training and testing index are time stamped and hence shuffling the data while sampling is not advised. We will take the data in order.
 
 ```{r}
-names(data_total)
+names(df)
 ```
 
 For the variable selection at first hand, we will choose the most important generator variables and the the most important gearbox variables.
@@ -100,39 +83,39 @@ Blds_PitchAngle_Max (Angle of the wind turbine blades)
 
 To that we will add the ambiant temperature as an extra variable that might come in handy later on when testing some combinations.
 
-```{r}
-#-- Variable selection by including all generator AND gearbox variables
-df = data_total %>% 
-  select(Turbine_ID,
-         Datetime,
-         Gen_RPM_Avg,
-         Amb_WindSpeed_Avg,
-         Prod_LatestAvg_TotActPwr,
-         Prod_LatestAvg_TotReactPwr,
-         Nac_Temp_Avg,
-         Gen_Bear_Temp_Avg,
-         Gen_Phase1_Temp_Avg,
-         Gen_Phase2_Temp_Avg,
-         Gen_Phase3_Temp_Avg,
-         Gear_Bear_Temp_Avg,
-         Amb_Temp_Avg,
-         Gear_Oil_Temp_Avg,
-         Amb_WindSpeed_Avg,
-         Hyd_Oil_Temp_Avg,
-         Blds_PitchAngle_Max) %>%
-  arrange(Datetime)
-```
-
 Before any preprocessing steps, we will retain 6 months of data for testing later on. We will not apply any preprocessing on this data. This makes up about 100k observations.
 
 ```{r}
 idx = seq(1, floor(dim(df)[1]*0.75))
-df11 = df[idx,]       #-- the data we will clean
+df_model = df[idx,]       #-- the data we will clean
 df_test = df[-idx,]   #-- the data we will use for testing later
 ```
 
 
 # Outliers detection and Data Cleaning
+
+## Outliers removal by Time series decomposition
+
+```{r}
+anoms = df_model %>% 
+  as_tibble() %>%
+  find_my_anomalies_ts() %>%
+  arrange(Turbine_ID, Datetime)
+
+#-- display the detected anomalies on the total data
+anoms %>% arrange(Datetime) %>% select(Turbine_ID, Datetime, contains("Temp"))
+```
+
+```{r}
+df_anoms = anoms %>% arrange(Datetime)
+#df11_t = data_clean_3 %>% as_tibble() %>% arrange(Datetime)
+
+#-- First make sure we get 136 anomalies if we filter the anomalies from the original data df11
+data_clean_1 = anti_join(df_model, df_anoms, by = c("Datetime", "Turbine_ID"))
+dim(df_model)[1]-dim(data_clean_1)[1]
+write.csv(data_clean_1,file = "data_clean_1.csv")
+```
+
 
 ## Univariate ouliers
 
@@ -141,17 +124,17 @@ A first approach is to detect outliers for each variable in our data set. We thu
 We consider here that a value is an outlier if it is outside the bounds defined by the quantiles of order 0.5% and 99.5%.
 
 ```{r}
-min=0.0005
-max=0.9995
-data_outliers_1=c()
-for (i in 3:ncol(df11)){
-  data_outliers_1=cbind(data_outliers_1,outlier.uni(df11[,i],min = min,max = max))
-}
-
-data_clean_1=df11[!apply(data_outliers_1, MARGIN = 1, any),]
-
-#-- display how many outliers have been removed
-cat("A total of", (dim(df11)[1] - dim(data_clean_1)[1]), "univariate outliers have been detected and removed")
+# min=0.0005
+# max=0.9995
+# data_outliers_1=c()
+# for (i in 3:ncol(df11)){
+#   data_outliers_1=cbind(data_outliers_1,outlier.uni(df11[,i],min = min,max = max))
+# }
+# 
+# data_clean_1=df11[!apply(data_outliers_1, MARGIN = 1, any),]
+# 
+# #-- display how many outliers have been removed
+# cat("A total of", (dim(df11)[1] - dim(data_clean_1)[1]), "univariate outliers have been detected and removed")
 ```
 
 Note that this method may have removed anomalies as well as univariate outliers. The two are calculated according to similar rules and distinguishing the two is a hard manual task.
@@ -167,7 +150,7 @@ Our strategy here will be to fit a model on the production data, and then, fixin
 Let's take a look at the scatter plot of the production :
 
 ```{r, fig.width=10, fig.height=6, warning=FALSE}
-ggplot(data_clean_1) + 
+ggplot(data_clean_1) +
   aes(x=Amb_WindSpeed_Avg,y=Prod_LatestAvg_TotActPwr,color=Turbine_ID) +
   geom_point(alpha = 0.3) + theme_bw() +
   ggtitle("Production data for all turbines")
@@ -233,7 +216,7 @@ Let's fix a threshold for the residuals and compute them
 
 ```{r, fig.width=10, fig.height=6, warning=FALSE}
 #-- fix threshold
-res.thresh=0.5*10^(5)
+res.thresh=0.3*10^(5)
 
 #-- compute the residuals :
 res=production.pred-data_clean_2$Prod_LatestAvg_TotActPwr
@@ -471,8 +454,11 @@ We won't show a box plot to avoid recalculating outliers based on the new means.
 After all the preprocessing steps are done, we will save the dataframe to be able to use it in the next notebook for modeling normal behavior
 
 ```{r}
+#write.csv(data_clean_1, file=gzfile("data_clean_1.csv.gz"), row.names = FALSE)
+#write.csv(data_clean_2, file=gzfile("data_clean_2.csv.gz"), row.names = FALSE)
+#write.csv(data_clean_3, file=gzfile("data_clean_3.csv.gz"), row.names = FALSE)
 #-- write a compressed csv of the results
-#write.csv(df11_final, file=gzfile("filtered_data.csv.gz"), row.names = FALSE)
+#write.csv(data_clean_3, file=gzfile("filtered_data.csv.gz"), row.names = FALSE)
 #write.csv(df_test, file=gzfile("unfiltered_data.csv.gz"), row.names = FALSE)
 ```
 
