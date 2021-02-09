@@ -38,7 +38,7 @@ fill_my_na = function(df){
     remove_rownames() %>%
     fill(Turbine_ID) %>% as_tibble()
   
-  cat("A Total of", sum(is.na(df_2)), "missing values have been introduced for all", dim(df_2)[2], "variables\n\n" )
+  #cat("A Total of", sum(is.na(df_2)), "missing values have been introduced for all", dim(df_2)[2], "variables\n\n" )
   return(df_2)
 }
 
