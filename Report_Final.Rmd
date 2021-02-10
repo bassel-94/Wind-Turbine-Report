@@ -110,15 +110,15 @@ Our initial analysis of the failure logs shows that there are some spelling mist
 
 Failures almost always come from abnormal overheating of the component in question. In the case of the SCADA data, the components of interest in this study are the generator and the gearbox. Naturally, out of the 83 variables provided, we will perform some manual variable selection based on engineering knowledge of the underlying systems as well as some other related research work ([references 2,3]). Only the variables that offer the richest insight into the behavior of a component are chosen to model the generator and the gearbox. 
 
-To model the behavior of the generator, we choose the generator's speed (in RPM) as the target variable and its related temperature variables as predictors such as Windpseed, power production (active and reactive), the Nacelle temperature, the generator's bearing temperature and the three temperatures of the phases of the generator (phases 1,2 and 3). Since the sensors provide information about the minimum, maximum, standard deviation and mean of the data collected in the 10 minute-interval, we choose the average.
+To model the behavior of the generator, we choose the generator's speed (in RPM) as the target variable and its related variables as predictors such as windspeed, power production (active and reactive), the Nacelle temperature, the generator's bearing temperature and the phase 1 temperature of the generator (phases 2 and 3 are highly correlated to this one). Since the sensors provide information about the minimum, maximum, standard deviation and mean of the data collected in the 10 minute-interval, we choose the average.
 
-The authors who carried out the research mentioned in article [2] claim that the study carried out to model the gearbox in a wind-turbine has been successful when choosing the gearbox's oil temperature as a target variable. Following their footsteps, we choose the same variable as a target and the variables concerning the gearbox bearing temperature, hydrolic oil temperature, windspeed, production power (active and reactive), the blade pitch angle and the ambiant temperature as predictors. Again, we take the average of the readings in the 10 minute-interval.
+The authors who carried out the research mentioned in article [2] claim that the study carried out to model the gearbox in a wind-turbine has been successful when choosing the gearbox's oil temperature as a target variable. Following their footsteps, we choose the same variable as a target and the variables concerning the gearbox bearing temperature, hydraulic oil temperature, windspeed, production power (active and reactive), the blade pitch angle and the ambient temperature as predictors. Again, we take the average of the readings in the 10 minute-interval.
 
-Finally, in order to be as precise as possible, we only model one turbine for each component seperately. Based on our preliminary analysis of the failure logs, We choose to model turbine T06's generator (in which we experience the most failrues) and T01's gearbox (in which we experience the only gearbox failure). It it worth mentioning that the turbine T09 had two gearbox failures, which makes it a good candidate for modeling but unfortunately we do not have access to its data.
+Finally, in order to be as precise as possible, we only model one turbine for each component separately. Based on our preliminary analysis of the failure logs, We choose to model turbine T06's generator (in which we experience the most failures) and T01's gearbox (in which we experience the only gearbox failure). It it worth mentioning that the turbine T09 had two gearbox failures, which makes it a good candidate for modeling but unfortunately we do not have access to its data.
 
 ## Exploratory data analysis
 
-As with all statistical modeling, data exploration is always the first step prior to any model development. Therefore, our analysis begins with a typical exploratory data analysis approach where we investigate the readings of some of the most important variables in the SCADA data to visally spot some important patterns. Such analysis is a crucial first step towards understanding the normal behavior of the turbines as well as understanding the abnormal behavior that triggered a failure.
+As with all statistical modeling, data exploration is always the first step prior to any model development. Therefore, our analysis begins with a typical exploratory data analysis approach where we investigate the readings of some of the most important variables in the SCADA data to visually spot some important patterns. Such analysis is a crucial first step towards understanding the normal behavior of the turbines as well as understanding the abnormal behavior that triggered a failure.
 
 ### Power production curve
 
@@ -163,7 +163,7 @@ df_to_plot %>%
   geom_point(alpha = 0.2, size = 0.7) + 
   theme_bw() + 
   geom_vline(xintercept = fail_dates_2016, size=1) +
-  ggtitle("Generator temperature variables along with failure dates") +
+  #ggtitle("Generator temperature variables along with failure dates") +
   xlab("Date")+
   ylab("Temperature value [degrees C]")+
   scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
@@ -188,7 +188,7 @@ df_to_plot %>%
   geom_point(alpha = 0.5, size = 0.7) + 
   theme_bw() + 
   geom_vline(xintercept = fail_dates_2016, size=1) +
-  ggtitle("Generator temperature variables along with failure dates") +
+  #ggtitle("Generator temperature variables along with failure dates") +
   xlab("Date")+
   ylab("Temperature value [degrees C]")+
   scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 week")) + 
@@ -232,7 +232,7 @@ df_total %>%
   gather(key = "Variable", value = "Values", -Datetime, -Turbine_ID) %>%
   ggplot(aes(x=Datetime, y=Values, col = Variable)) + 
   geom_point(alpha = 0.5, size = 0.7) +
-  theme_bw() + ggtitle("Gearbox's important variables scatter plot") + 
+  theme_bw() + #ggtitle("Gearbox's important variables scatter plot") + 
   geom_vline(xintercept = fail_gear_dates, size = 1) + 
   geom_hline(yintercept = 60, color = "darkred") +
   scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("2 day")) + 
@@ -285,7 +285,7 @@ p = df_total %>%
 
 ```{r anoma,  fig.align='center', fig.width=8, fig.height=3, fig.cap="Plot of the generator's bearing temperature anomalies on T06 in 2016"}
 p %>% plot_anomalies(alpha_dots = 0.1, size_dots = 0.7) + 
-  ggtitle("Anomalies of T06's generator's bearing temperature in 2016") + 
+  #ggtitle("Anomalies of T06's generator's bearing temperature in 2016") + 
   scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
   theme(axis.text.x = element_text(angle = 0, hjust = 0.6),
         plot.title = element_text(size = 10, face = "bold", hjust = 0.6),
@@ -322,7 +322,7 @@ data_clean_1 = anti_join(df_model, df_anoms, by = c("Datetime", "Turbine_ID"))
 dim(df_model)[1]-dim(data_clean_1)[1]
 ```
 
-The modeling set contains 312852 out of which 11758 rows has been identified to contain at least one anomaly. Therefore, we proceed by removing the rows all together in order to be able to model the normal behavior later on without any rogue temperature readings.
+The modeling set contains 312,852 out of which 11,758 rows has been identified to contain at least one anomaly. Therefore, we proceed by removing the rows all together in order to be able to model the normal behavior later on without any rogue temperature readings.
 
 ### Multivariate outlier detection 
 
@@ -366,7 +366,7 @@ ggplot(df.test, aes(x=Windspeed, y=Production_power)) +
   geom_point(aes(y=Predicted_values), size = 0.7) + 
   theme_bw() +
   ylab("Production power in Wh") +
-  ggtitle("Semi filtered power production as a function of windspeed") +
+  #ggtitle("Semi filtered power production as a function of windspeed") +
   theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6),
         legend.title = element_text(size = 8, face = "bold"),
         legend.text = element_text(size = 6),
@@ -406,19 +406,15 @@ p3<-ggplot(data_clean_3, aes(x=Amb_WindSpeed_Avg,y=Prod_LatestAvg_TotActPwr,colo
 grid.arrange(p1,p3,nrow=1)
 ```
 
-Note that 104927 observations have been removed during both steps of our cleaning, which corresponds to 33.54% of the original data set. Although this may seem like a lot of observations removed, bear in mind that many observations were discarted as abnormal behavior in the original dataset. This includes un-operational turbines for which we do not produce any power (e.g. left plot in Figure \ref{fig:filter_comparison}).
+Note that 104,927 observations have been removed during both steps of our cleaning, which corresponds to 33.54% of the original data set. Although this may seem like a lot of observations removed, bear in mind that many observations were discarted as abnormal behavior in the original dataset. This includes un-operational turbines for which we do not produce any power (e.g. left plot in Figure \ref{fig:filter_comparison}).
 
 However, if we are convinced that a lot of outliers have been removed, we cannot be sure that the clean data set does not contain any. Nevertheless, considering a value as an outlier can be sometimes subjective, we can reasonably consider that the data set that we will use for training our model contains a large majority of usual values, and is clean enough.
 
 ## Modeling normal behavior
 
-### Modeling generator
-
-This is Guillaume's part
-
-### Modeling Gearbox
-
 In order to model the normal behavior of the Gearbox, we will fit an XGBoost model on the training set (which is 80% of the modeling set). As mentioned in the section Variable selection, we will use the gearbox's oil temperature as the target variables and the gearbox's bearing temperature, the hydraulic oil temperature, the ambiant windspeed, the production power (active and reactive), the blade's pitch angle and the ambiant temperature as predictors. The fit is done only on turbine T01's gearbox and predict values for the validation set in order to evaluate the model. Lastly, we use the test data (i.e. the last 6 months of data) to test the model.
+
+Similarly, we will model the normal behavior of the generator using the generator's rpm as the target variable, and Windspeed, power production (active and reactive), the Nacelle temperature, the generator's bearing temperature and the phase 1 temperature of the generator as predictors. The fit is done only on turbine T06's generator and predict values for the validation set in order to evaluate the model.
 
 It is worth mentioning that for turbine T01, no failures have been registered for the last 6 months of data.
 
@@ -450,7 +446,7 @@ df_valid_gear = df_model_gear[-idx_train,]
 #-- plot the target variable to see what it looks like
 ggplot(df_train_gear, aes(x = Datetime, y =Gear_Oil_Temp_Avg )) + 
   geom_point(alpha = 0.1, size=0.7) + theme_bw() +
-  ggtitle("Gear Oil temperature average in time in Turbine T06") +
+  #ggtitle("Gear Oil temperature average in time in Turbine T06") +
   scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) +
   xlab("Date")+
   ylab("Temperature value [degrees C]")+
@@ -464,29 +460,40 @@ ggplot(df_train_gear, aes(x = Datetime, y =Gear_Oil_Temp_Avg )) +
 ## Predicting failures
 
 Predicting failures after we define boundaries of the normal behavior of the turbine using the model's output is discussed herein.
-In order to capture abnormal behavior, we will first fix a threshold based on which we classify the residuals as abnormal. To do so we consider the maximum norm $\ell_{\infty}$ of the residuals in the validation set as the normal behavior boundaries.
+In order to capture abnormal behavior, we will first fix a threshold based on which we classify the residuals as abnormal. 
 
-To formulate the problem at hand, let $n$ be the number of observations and $\mathbf{x}$ a vector such that
+<!-- To do so we consider the maximum norm $\ell_{\infty}$ of the residuals in the validation set as the normal behavior boundaries.-->
+
+To formulate the problem at hand, let $n$ be the number of observations and $\mathbf{r}$ the vector of residuals :
 
 $$
-\mathbf{x} = (y_1 - \hat{y}_1, y_2 - \hat{y}_2, \cdots, y_n - \hat{y}_n )
+\mathbf{r} = (y_1 - \hat{y}_1, y_2 - \hat{y}_2, \cdots, y_n - \hat{y}_n )
 $$
 
-Where $y_i$ and $\hat{y}_i$ are the target variable and its prediction. The threshold to take would be defined as follows :
+Where $y_i$ and $\hat{y}_i$ are the target variable and its prediction. For each component, we will define the threshold based on the residuals obtained on the validation set.
+
+<!-- The threshold to take would be defined as follows :
 
 $$
 \text {threshold} =  || \mathbf{x} ||_{\infty} = \text{max} (|\mathbf{x}_1|, |\mathbf{x}_2|, \cdots, |\mathbf{x}_n| )
 $$
+-->
+By examining the difference between observed and predicted values for the test set (on which we do not apply any preprocessing), we examine the data points that fall outside of the normal behavior envelope defined by the threshold to capture abnormal behavior that occurred in the last 6 months of data.
 
-By examining the difference between observed and predicted values for the test set (on which we do not apply any preprocessing), we examine the data points that fall outside of the normal behavior envelope defined by the threshold above so as to capture abnormal behavior that occured in the last 6 months of data.
+$$
+\begin{cases}
+\text{If } |y-\hat{y}| > thresh  &\rightarrow \text{ abnormal } \\
+\text{Otherwise} &\rightarrow \text{ normal}
+\end{cases}
+$$
 
 ```{r scat, out.width="35%", fig.cap="Demonstration of normal behavior boundaries and anomalies on the last 6 months of data", fig.align='center'}
-knitr::include_graphics(rep('~/Smart Data project/Report/Wind-Turbine-Report/Figures/boundaries.png'))
+knitr::include_graphics(rep('Figures/boundaries.png'))
 ```
 
 Figure \ref{fig:scat} illustrates an example of the normal behavior envelope and how it may help detect abnormal behavior if a data points falls outside its reach.
 
-In addition to the threshold, the previous preprocessing showed that the normal behavior boundaries of the gearbox oil temperature average is about 60 degrees. Therefore, an additional contraint will be applied as follows :
+In addition to the threshold, the previous exploratory analysis showed that the normal behavior boundaries of the gearbox oil should not 60 degrees. Therefore, for this particular component, an additional constraint will be applied as follows :
 
 $$
 \begin{cases}
@@ -532,7 +539,7 @@ p1 = ggplot(g1, aes(x=predicted, y=observed)) +
 
 p2 = ggplot(g2, aes(x=predicted, y=observed)) + 
   geom_point(alpha = 0.1, size = 0.7) + theme_bw() +
-  ggtitle("Obs. vs pred. values in training set")+ 
+ ggtitle("Obs. vs pred. values in training set")+ 
   geom_smooth(method='lm', formula = y~x, color = "steelblue") +                        #-- the linear regression line
   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") + #-- the slope line (y=x)
   theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
@@ -544,16 +551,18 @@ p2 = ggplot(g2, aes(x=predicted, y=observed)) +
 grid.arrange(p1, p2, ncol=2)
 ```
 
+\newpage
+
 We then study the residuals obtained on the validation set, and obtain a standard deviation of $\sigma_{gear} \approx 1.02$ for a distribution of the residuals once again close to a Gaussian normal distribution (see Figure \ref{fig:hist}).
 
-```{r hist, warning=FALSE, fig.height=2.5, fig.width=3, fig.align="center", fig.cap="\\label{fig:hist}Residuals of the model on the validation set for the generator's rpm"}
+```{r hist, warning=FALSE, fig.height=2.5, fig.width=3, fig.align="center", fig.cap="\\label{fig:hist}Residuals distribution on the validation set for the generator's rpm"}
 res = (g1$observed - g1$predicted) %>% 
   as_tibble()
 
 ggplot(res, aes(x=value)) + 
   geom_histogram(color="white", bins = 55) + 
   theme_bw() + 
-  ggtitle("Distribution of the residuals") +
+  #ggtitle("Distribution of the residuals") +
   xlim(c(-70,70)) +
   theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
         legend.title = element_text(size = 8, face = "bold"),
@@ -574,7 +583,7 @@ knitr::kable(metric.test.gen,caption = "Evaluation of the fit for Gen_RPM_Avg\\l
 
 The evaluation metrics are obviously not as good as for a clean data set, which is normal.
 
-```{r gen_test,fig.width=4, fig.height=3, fig.align='center', warning=FALSE,fig.cap="\\label{fig:gen_test}Observed Vs Predicted for the generator's rpm values in test set"}
+```{r gen_test,fig.width=4, fig.height=3, fig.align='center', warning=FALSE,fig.cap="\\label{fig:gen_test}Observed Vs Predicted values for the generator's rpm in test set"}
 #-- build data frames of predicted and observed values of train and test data
 g3 = read.csv("Code/data_test_gen.csv.gz")
 #write.csv(g3, file=gzfile("data_test_gen.csv.gz"), row.names = FALSE)
@@ -586,8 +595,8 @@ ggplot(g3, aes(x=predicted, y=observed)) +
         legend.title = element_text(size = 8, face = "bold"),
         legend.text = element_text(size = 6),
         axis.text=element_text(size=6),
-        axis.title=element_text(size=8,face="bold")) +
-  ggtitle("Obs. vs pred. values in validation set")
+        axis.title=element_text(size=8,face="bold")) #+
+  #ggtitle("Obs. vs pred. values in validation set")
 ```
 
 In Figure \ref{fig:gen_test}, we can observe that the fit on the test set is nevertheless quite good, but the model has a lot of difficulties to fit the low values of the Generator RPM (less than 500 RPM). Predicting the generator's failure is performed by defining a normal behavior envelope similar to the illustration in Figure \ref{fig:scat}. By declaring observations for which the residual exceed the threshold that we fix as an anomaly, we obtain 8,184 out of 26,095 abnormal values in the test set for turbine T06. 
@@ -604,7 +613,7 @@ df_gen_pred_thresh %>%
   gather(key = "Variables", value = "values", -Datetime) %>%
   ggplot(aes(x=Datetime, y=values, color = Variables)) +
   geom_point(alpha = 0.5, size = 0.7) + 
-  ggtitle("Anomalies predicted by our threshold method") + 
+  #ggtitle("Anomalies predicted by our threshold method") + 
   theme_bw() +
   scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) +
   theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
@@ -628,7 +637,7 @@ knitr::kable(metric.gear,caption = "Evaluation of the fit for Gear_Oil_Temp_Avg\
 
 We can see on Figure \ref{fig:gof_gear} how precise our fit is.
 
-```{r gof_gear, fig.width=7, fig.height=3, warning=FALSE,fig.cap="\\label{fig:gof_gear}Observed Vs Predicted gear oil temperature values"}
+```{r gof_gear, fig.width=7, fig.height=3, warning=FALSE,fig.cap="\\label{fig:gof_gear}Observed Vs Predicted values for gearbox oil temperature"}
 #-- build data frames of predicted and observed values of train and test data
 g1<-read.csv("Code/data_valid_gear.csv.gz")
 g2<-read.csv("Code/data_train_gear.csv.gz")
@@ -661,14 +670,14 @@ grid.arrange(p1, p2, ncol=2)
 
 Next, similar to the steps followed in the previous section regarding the generator, we study the distribution of the residuals obtained on the validation set which gives a standard deviation of $\sigma_{gear} \approx 1.02$. Once again, a nice Gaussian distribution is observed upon plotting the results which we can see in Figure \ref{fig:histgear}.
 
-```{r histgear, warning=FALSE, fig.height=2.5, fig.width=3, fig.align="center", fig.cap="\\label{fig:histgear}Residuals of the model on the validation set for the gearbox's oil temperature"}
+```{r histgear, warning=FALSE, fig.height=2.5, fig.width=3, fig.align="center", fig.cap="\\label{fig:histgear}Residuals distribution on the validation set for the gearbox's oil temperature"}
 res = (g1$observed - g1$predicted) %>% 
   as_tibble()
 
 ggplot(res, aes(x=value)) + 
   geom_histogram(color="white", bins = 55) + 
   theme_bw() + 
-  ggtitle("Distribution of the residuals") +
+ # ggtitle("Distribution of the residuals") +
   xlim(c(-5,5)) +
   theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
         legend.title = element_text(size = 8, face = "bold"),
@@ -696,7 +705,7 @@ g3 = read.csv("Code/data_test_gear.csv.gz")
 #-- plot predicted values against real values and see if its linear
 ggplot(g3, aes(x=predicted, y=observed)) + 
   geom_point(alpha = 0.05, size = 0.7) + theme_bw() +
-  ggtitle("Obs. vs pred on the test set for Gear oil temperature") + 
+  #ggtitle("Obs. vs pred on the test set for Gear oil temperature") + 
   theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
         legend.title = element_text(size = 8, face = "bold"),
         legend.text = element_text(size = 6),
@@ -715,7 +724,7 @@ p2 = df_pred_thresh %>%
   gather(key = "Variables", value = "values", -Datetime) %>%
   ggplot(aes(x=Datetime, y=values, color = Variables)) + 
   geom_point(alpha = 0.5, size = 0.7) +
-  ggtitle("Anomalies predicted by our threshold method") +
+  #ggtitle("Anomalies predicted by our threshold method") +
   theme_bw() + 
   scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
   geom_hline(yintercept = 60, color = "red") +
@@ -729,6 +738,16 @@ p2
 
 A total of 881 anomalies are obtained out of 26,019 observations in the test set for turbine T01. Figure \ref{fig:gear_anom} shows the predicted and the observed values in the last 6 months to see how well the model is able to predict the turbine's behavior. Indeed, a handful of values have been detected to surpass the 60 degrees celcius threshold which is considered an anomaly. Due to the fact that the difference between predicted and observed values is small, some values may be falsely declared as anomalies.
 
+
 # Conclusion
 
+Predicting a component's failure before it happens is still a widely researched field in engineering. Recent advances in data analysis and statistical modeling have allowed to model normal behavior and predict anomalies in a data-driven approach. The study conducted on the wind turbine's main components has indeed shown that modeling based approaches can be applied in order to detect anomalies.
+
+To some extent, we have managed to model the normal behavior of the components studied by a gradient boosting regression trees. However, this modeling was performed on a clean data set which is not the case in real life. Therefore, our thresholding method predicts too many anomalies on the unprocessed data set. In fact, an access to full alarm logs would bring very useful insights on how well the model performs.
+
+For the gearbox : the number of anomalies detected is quite reasonable, and could indeed correspond to an unusual behavior of the gearbox, even if it doesn't lead to a failure. 
+
+For the generator : the number of anomalies detected is very high (approximately a third of the data), so we can say our threshold is not precise enough. Actually, we can observe on Figure \ref{fig:gen_anom} that many values flagged as anomalies correspond to a very low generator speed. Further studies should focus on determining why the generator speed has such a lot of low values to determine which behavior is normal or not.
+
+Ultimately, distinguishing outliers from anomalies would be important in further studies. In addition, studying in detail the anomalies detected with our method should be carried out to fine tune the threshold. Similar modeling steps could be performed on different turbines which would confirm the scalability of the model. Future work could also be conducted on all of the wind-turbine's components in order to trace back the failure to a specific system.
 
