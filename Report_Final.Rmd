@@ -15,7 +15,7 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE)    #-- do not include any code chunks
 knitr::opts_chunk$set(warning = FALSE) #-- do not produce any warnings 
-#knitr::opts_chunk$set(dev = 'png')     #-- to reduce the size of the knitted pdf
+knitr::opts_chunk$set(dev = 'png')     #-- to reduce the size of the knitted pdf
 ```
 
 \newpage
@@ -41,11 +41,11 @@ The analysis steps that have been explored in order to model the normal behavior
 knitr::include_graphics(rep('Figures/workflow.png'))
 ```
 
-The ultimate goal of this study is to model the normal behavior and predict a failure through data points that fall outside the envelop of a *normal* behavior of a wind-turbine. To do so, we focus this study on two main components; the *generator* and the *gearbox*, as their maintenance task results in the longest downtimes. Each of the steps mentioned in the workflow will be discussed in greated detail throughout this report.
+The ultimate goal of this study is to model the normal behavior and predict a failure of a wind-turbine through data points that fall outside the envelop of what we define a *normal* behavior. To do so, we focus this study on two main components; the *generator* and the *gearbox*, as their maintenance task results in the longest downtimes. Each of the steps mentioned in the workflow will be discussed in greated detail throughout this report.
 
 ## Signal Variables
 
-Before diving into the details of each section mentioned in the workflow above, we first define the nature of the variables at hand. The SCADA system collects information about electrical and mechanical components through temperature sensors cleverly placed on multiple components such as Transformers, Generator, Gearbox, the hub that encapsulates the systems and some other hydrolic and electric systems. Some additional information about the power production of the turbine as well as the angle orientation of the blades is also available.
+Before diving into the details of each section mentioned in the workflow above, we first define the nature of the variables at hand. The SCADA system collects information about electrical and mechanical components through temperature sensors cleverly placed on multiple components such as Transformers, Generator, Gearbox, the hub that encapsulates the systems and some other hydraulic and electrical systems. Some additional information about the power production of the turbine as well as the angle orientation of the blades is also available.
 
 The data is acquired on four Wind Turbines identified in a variable called *Turbine_ID* over two years (2016 and 2017) with a sampling frequency of 10 minutes. Besides the identifier of the turbine and the timestamp, a majority of variables correspond to measurements such as temperatures (in degrees celcius), power production (in Watt-hour), orientation (in degrees) and speed (in meters per second). Each measurement in the data set is made in the last ten minutes observed.
 
@@ -60,12 +60,17 @@ library(tidyverse)
 library(lubridate)
 library(ggplot2)
 library(scales)
+library(anomalize)
+library(parallel)
+library(xgboost)
+library(Metrics)
 source("Code/functions.R")
 
 #-- load original data
 df_total = read_csv("Code/original_data.csv.gz") %>% 
   mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
-  as_tibble()
+  as_tibble() %>%
+  arrange(Datetime)
 
 #-- load the 2016 and 2017 failure data
 failures = read_csv("Code/failures.csv.gz") %>% 
@@ -85,27 +90,30 @@ knitr::kable(to_display, caption = "The first few rows and columns of the SCADA 
 
 ## Failure logs
 
-In addition to the provided SCADA data, we also have access to the failure logs of the turbines, where we can find information regarding the component that failed, the time the failure was found out, and some remarks made by the technician who observed the failure. We present below the first lines of these logs.
+In addition to the provided SCADA data, we also have access to the failure logs of the turbines where we can find information regarding the component that failed, the time when the failure was logged, and some remarks made by the technician who observed the failure. In total, we have access to 28 failures over the two years of data for all 4 turbines. 
+We present below the first lines of these logs.
 
-```{r}
+```{r fail}
 failures_to_display = failures %>%
   select(Turbine_ID, Datetime, Component, Remarks) %>%
   as_tibble() %>%
-  mutate(Remarks = paste0(substr(Remarks, 1, 20), "...")) %>%
+  mutate(Remarks = paste0(substr(Remarks, 1, 22), "...")) %>%
   slice_head(n=5)
 
 knitr::kable(failures_to_display, caption = "The first few rows of the failure logs", align = 'c')
 ```
 
-Our initial analysis of the failure logs shows that there are some spelling mistakes in the Remarks which makes the data prone to humain errors. Indeed, the failures are logged by technicians on site during working ours even though the alarm may have been triggered beforehand. One can also observe that the generator is the most sensitive component, in the sense that it is the one which suffered the most failures, especially with turbine T06. We explore the failures in further detail later.
+Our initial analysis of the failure logs shows that there are some spelling mistakes in the Remarks which makes the data prone to humain errors. Indeed, the failures are logged by technicians on site during working hours even though the alarm may have been triggered beforehand. One can also observe that the generator is the most sensitive component, in the sense that it is the one which suffered the most failures, especially with turbine T06. We explore the failures in further detail later.
 
 ## Variable selection
 
-Failures almost always come from abnormal overheating of the component in question. In the case of the SCADA data, the components of interest in this study are the generator and the gearbox. Naturally, out of the 84 variables provided, we will perform some manual variable selection based on engineering knowledge of the underlying systems as well as some other related research work ([references 2,3]). Only the variables that offer the richest insight into the behavior of a component are chosen to model the generator and the gearbox. 
+Failures almost always come from abnormal overheating of the component in question. In the case of the SCADA data, the components of interest in this study are the generator and the gearbox. Naturally, out of the 83 variables provided, we will perform some manual variable selection based on engineering knowledge of the underlying systems as well as some other related research work ([references 2,3]). Only the variables that offer the richest insight into the behavior of a component are chosen to model the generator and the gearbox. 
 
 To model the behavior of the generator, we choose the generator's speed (in RPM) as the target variable and its related temperature variables as predictors such as Windpseed, power production (active and reactive), the Nacelle temperature, the generator's bearing temperature and the three temperatures of the phases of the generator (phases 1,2 and 3). Since the sensors provide information about the minimum, maximum, standard deviation and mean of the data collected in the 10 minute-interval, we choose the average.
 
 The authors who carried out the research mentioned in article [2] claim that the study carried out to model the gearbox in a wind-turbine has been successful when choosing the gearbox's oil temperature as a target variable. Following their footsteps, we choose the same variable as a target and the variables concerning the gearbox bearing temperature, hydrolic oil temperature, windspeed, production power (active and reactive), the blade pitch angle and the ambiant temperature as predictors. Again, we take the average of the readings in the 10 minute-interval.
+
+Finally, in order to be as precise as possible, we only model one turbine for each component seperately. Based on our preliminary analysis of the failure logs, We choose to model turbine T06's generator (in which we experience the most failrues) and T01's gearbox (in which we experience the only gearbox failure). It it worth mentioning that the turbine T09 had two gearbox failures, which makes it a good candidate for modeling but unfortunately we do not have access to its data.
 
 ## Exploratory data analysis
 
@@ -125,7 +133,7 @@ Figure \ref{fig:prod} displays the power production data with respect to the win
 
 In order to analyze the failure of the generator, it is important to understand its causes. To do so, we choose to plot only turbine T06's generator related temperatures and add thick black lines at each failure date. To avoid overcrowding the plots, we will plot the data in a smaller time window (from 2016-06-01 to 2016-12-01). This time-window in which we plot the variables is the time-window in which we had most of the generator failures.
 
-```{r genvar, fig.align='center', fig.width=8, fig.height=4, fig.cap="Plot of the generator's temperature variables with its dates of failures in black lines"}
+```{r}
 #-- get failure dates
 fail_dates_2016 = failures %>% 
   filter(Turbine_ID == "T06" , Component == "GENERATOR") %>% 
@@ -145,7 +153,9 @@ df_to_plot = df_total %>%
   arrange(Datetime) %>%
   as_tibble() %>%
   fill_my_na()
+```
 
+```{r genvar, fig.align='center', fig.width=8, fig.height=3, fig.cap="Plot of the generator's temperature variables with its dates of failures in black lines"}
 df_to_plot %>%
   gather(key = "Temp_Variable", value = "Value", -Datetime_full, -Turbine_ID) %>%
   ggplot(aes(x = Datetime_full, y = Value, color = Temp_Variable )) + 
@@ -167,9 +177,9 @@ Preliminary analysis of the plots displayed in Figure \ref{fig:genvar} for the g
 
 In addition, We notice that not all generator failures indicate abnormal temperature behavior. In fact, out of the 5 failures represented in Figure \ref{fig:genvar} that heppened in turbine T06's generator, only two are reliable; the third and the fourth failures for they show abnormal temperature behaviors (up to 200 degrees). Said failures will be considered as a reference in the anomaly detection techniques we will discuss in later sections.
 
-Finally, the plots show that some rogue temperature measurement that were up to 200 degrees for all 4 variables were not discarted as a failure in the logs. If we zoom in further on this particular event for which no failures logs have been registered, we get the plot in \ref{fig:zoom}  We may consider them as outliers.
+Finally, the plots show that some rogue temperature measurement that were up to 200 degrees for all 4 variables were not discarted as a failure in the logs. Zooming in further on this particular event for which no failures logs have been registered, we get the plot in Figure \ref{fig:zoom}.
 
-```{r zoom, fig.align='center', fig.width=8, fig.height=4, fig.cap="Plot of the generator's rogue temperature points which have not been detected as failures"}
+```{r zoom, fig.align='center', fig.width=8, fig.height=3, fig.cap="Plot of the generator's rogue temperature points which have not been detected as failures"}
 df_to_plot %>%
   filter(Datetime_full < "2016-12-01" & Datetime_full > "2016-10-15") %>%
   gather(key = "Temp_Variable", value = "Value", -Datetime_full, -Turbine_ID) %>%
@@ -188,11 +198,11 @@ df_to_plot %>%
         axis.title=element_text(size=8,face="bold"))
 ```
 
-The logs show that on 2016-10-27 (the black line in Figure \ref{fig:zoom}), the generator has been replaced. A few days later, the sensors were clocked at 205 degrees celcius for a three days straight from 2016-11-02 to 2016-11-04. Such high values can be explained by multiple reasons. Either they are outliers (i.e. caused by sensor calibration issues) or an undetected anomaly.
+The logs show that on 2016-10-27 (the black line in Figure \ref{fig:zoom}), the generator has been replaced. A few days later, the sensors were clocked at 205 degrees celcius for a three days straight from 2016-11-02 to 2016-11-04. Such high values can be explained by multiple reasons. Either they are outliers (e.g. caused by sensor calibration issues) or an undetected anomaly (e.g. not registered in the failures logs).
 
 ### Gearbox's failures
 
-Upon examining the failure dates of the gearbox component of the Turbine T06, we notice that only one failure happened in 2017-10-17.  Therefore, we will visualize the temperature variables and the failure date in a zoomed-in 2 weeks window (i.e. 7 days before the failure occured and 7 days after).
+Upon examining the failure dates of the gearbox component of turbine T01, we notice that only one failure occured in 2016-07-18. The remarks noted by the technician were "Gearbox pump damaged". Therefore, we will visualize the temperature variables and the failure date in a zoomed-in 2 weeks window (i.e. 7 days before the failure occured and 7 days after).
 
 ```{r}
 #-- define gearbox variables
@@ -208,21 +218,23 @@ gear_var = c("Datetime",
              "Amb_Temp_Avg")
 
 fail_gear_dates = failures %>%
-  filter(Component == "GEARBOX", Turbine_ID == "T06") %>% 
+  filter(Component == "GEARBOX", Turbine_ID == "T01") %>% 
   pull(Datetime)
 ```
 
-```{r gear, fig.align='center', fig.width=8, fig.height=4, fig.cap="Plot of the gearbox's variables, the failure date in black and the 60 degrees threshold in darkred"}
+```{r gear, fig.align='center', fig.width=8, fig.height=3, fig.cap="Plot of the gearbox's variables, the failure date in black and the 60 degrees threshold in darkred"}
+#-- Plot pipeline for gearbox variables
 df_total %>%
+  filter(Turbine_ID == "T01") %>%
   select(all_of(gear_var), -contains("Pwr"), -Amb_Temp_Avg, -Amb_WindSpeed_Avg) %>%
-  filter(Datetime < "2017-10-24" & Datetime > "2017-10-10") %>%
+  filter(Datetime < "2016-07-25" & Datetime > "2016-07-11") %>%
   gather(key = "Variable", value = "Values", -Datetime, -Turbine_ID) %>%
   ggplot(aes(x=Datetime, y=Values, col = Variable)) + 
   geom_point(alpha = 0.5, size = 0.7) +
   theme_bw() + ggtitle("Gearbox's important variables scatter plot") + 
   geom_vline(xintercept = fail_gear_dates, size = 1) + 
   geom_hline(yintercept = 60, color = "darkred") +
-  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("2 days")) + 
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("2 day")) + 
   theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
         legend.title = element_text(size = 8, face = "bold"),
         legend.text = element_text(size = 6),
@@ -230,6 +242,239 @@ df_total %>%
         axis.title=element_text(size=8,face="bold"))
 ```
 
-Figure \ref{fig:gear} shows that around the date of the failure, the pitch angle had changed drastically from angles centered around 0 to more than 75 degrees in a matter of minutes. Similarly, some abnormally high temperatures for the gearbox bearing and the gearbox oil temperature above 60 degrees celcius. In fact, according to a study conducted on wind turbines' gearboxes, under normal conditions the temperature in the gearbox (oil and bearing) should not surpass 60 degrees. Indeed, the reliability of the gearbox becomes less than 50% should its temperature exceeds 60 degrees celcius. A combination of all the observed abnormal conditions could have triggered the failure in the gearbox.
+Figure \ref{fig:gear} shows that around the date of the failure, a high variability in the pitch angle is observed. In some days, the angle ranges between 0 and 25 degrees. On more rare occasions, the blades are tilted to more than 75 degrees in a matter of minutes. It can be seen that the blade angles affect the gearbox's temperatures. This can be clearly spotted right after the failure date where the blades were continously maintained at around 78 degrees for more than 24 hours which dropped all gearbox's related temperatures drastically.
+
+Similarly, we can observe that on some days the gearbox bearing temperature goes higher than 60 degrees celcius (above the dark red horizontal line on the plot). In fact, according to a study conducted on wind turbines' gearboxes [ref.4], under normal conditions the temperature in the gearbox (oil and bearing) should not surpass 60 degrees. Indeed, the reliability of the gearbox becomes less than 50% should its temperature exceeds 60 degrees celcius. A combination of all the observed abnormal conditions could have triggered the failure in the gearbox.
 
 # Approach
+
+## Modeling and evaluation
+
+After variable selection and exploratory data analysis, we proceed in the following sections by introducing the steps that lead to modeling the normal behavior of the components in question. The modeling process entails splitting the data in two parts; a modeling set which contains 18 months of data and a test set which contains the last 6 months of data. The modeling set is then split in two parts for training and evaluating the model according to a 80-20% ratio. Data shuffling is avoided to respect the time arrangmenet of the observations. 
+
+Throughout the study, we apply all preprocessing steps uniquely on the modeling set, leaving the test set unfiltered and unclean. Based on selected components and their corresponding predictors, we fit a tree-based extreme gradient boosting (XGBoost) model on the train set and evaluate its performance on the validation set using root mean squared error (RMSE), mean absolute error (MAE) and the $R^2$ to demonstrate the goodness of fit. XGBoost models offer a wide range of hyperparameters such as [ref.5 Hands-on machine learning with R] :
+
+* Regularization hyperparameter to provide an extra later of protection against over-fitting
+* Early stopping criterion to stop growing trees when they offer no more improvement to the model
+* Parallel processing (since it is sequential by nature)
+* Choice of a loss function to optimize the gradient boosting models
+
+The residuals produced with the help of the model will help perform failure prediction on the test data via thresholding on the difference between the residuals. The latter is discussed in more detail in the last subsection on predicting failures.
+
+## Preprocessing steps
+
+### Univariate outliers and anomaly detection
+
+One of the highlights of this study has been exploring ways to approach analyzing the rogue data points that fall far beyond the mean of the overall data. Usually, data points that are significantly different from other observations whithin the same variable are casted as univariate outliers. In the case of a timestamped temperature measurement in a carefully engineered component like a wind-turbine's generator or gearbox, An abnormal observation may be an indication of an anomaly.
+
+Our exploratory data analysis has indeed shown that some generator failures, e.g. the third and fourth ones visible in Figure \ref{fig:genvar}, were triggered by anomalies in temperature related variables. Therefore, in this section, we will study the variables independently as univariate time series in order to perform anomaly detection using the package **anomalize** which has been developped specifically for this reason. 
+
+One important thing to do with Time-Series data before anayzing its abnormal behavior is Time-Series decomposition. After decomposing the Time-Series into trend, seasonal and remainder components, the anomaly detection is carried out in the remainder component which, under normal curcimstances, should not have any structure. In fact, the remainder should be completely random with no rogue observations if the data does not contain any outliers. If one is detected, then it is flagged as an anomaly. 
+
+For the purpose of demonstration, the plot produced in Figure \ref{fig:anoma} shows how an anomaly is detected on the generator's bearing temperature 
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+#-- plot anomalies of T06's generator bearing temperature in 2016
+p = df_total %>%
+  as_tibble() %>%
+  filter(Turbine_ID == "T06", Datetime < "2017-01-01") %>%
+  time_decompose(Gen_Bear_Temp_Avg, method = "stl", frequency = "auto", trend = "auto", message = FALSE) %>%
+  anomalize(remainder)
+```
+
+```{r anoma,  fig.align='center', fig.width=8, fig.height=3, fig.cap="Plot of the generator's bearing temperature anomalies on T06 in 2016"}
+p %>% plot_anomalies(alpha_dots = 0.1, size_dots = 0.7) + 
+  ggtitle("Anomalies of T06's generator's bearing temperature in 2016") + 
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.6),
+        plot.title = element_text(size = 10, face = "bold", hjust = 0.6),
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.text = element_text(size = 6),
+        axis.text=element_text(size=6),
+        axis.title=element_text(size=8,face="bold"))
+```
+
+
+It becomes immediatly clear that temperature readings above 200 degrees celcius are flagged as anomalies as we can see in the plot in Figure \ref{fig:anoma}. Similarly, we apply the same technique on all *temperature related* variables in our data set to identify the dates of the anomalies of each turbine. The advantage of using such method to detect anomalies is that it offers rich insight on how the data behaved by seasonality. For example, the average components' temperatures in the summer is naturally slightly higher than the one during cold winters. The difference between summer and winter temperatures in France may reach up to 40 degrees celcius in some areas. By extension, a Time-Series decomposition returns a lower number of anomalies by taking into account seasonality effects.
+
+We will apply this method on all temperature related variables for all turbines and remove them from the modeling dataset (i.e. the set that contains the first 18 months of data).
+
+```{r, include=FALSE}
+#-- split the data
+idx = seq(1, floor(dim(df_total)[1]*0.75))
+df_model = df_total[idx,]     
+df_test = df_total[-idx,]
+
+#-- detect anomalies
+anoms = df_model %>% 
+  as_tibble() %>%
+  find_my_anomalies_ts() %>%
+  arrange(Turbine_ID, Datetime)
+
+#-- display the detected anomalies on the total data
+anoms %>% arrange(Datetime) %>% select(Turbine_ID, Datetime, contains("Temp"))
+
+df_anoms = anoms %>% arrange(Datetime)
+
+#-- First make sure we get 136 anomalies if we filter the anomalies from the original data df11
+data_clean_1 = anti_join(df_model, df_anoms, by = c("Datetime", "Turbine_ID"))
+dim(df_model)[1]-dim(data_clean_1)[1]
+```
+
+The modeling set contains 312852 out of which 11758 rows has been identified to contain at least one anomaly. Therefore, we proceed by removing the rows all together in order to be able to model the normal behavior later on without any rogue temperature readings.
+
+### Multivariate outlier detection 
+
+This is Guillaume's part 
+Thresholding and plots of the power curves before and after cleaning.
+
+## Modeling normal behavior
+
+### Modeling generator
+
+This is Guillaume's part
+
+### Modeling Gearbox
+
+In order to model the normal behavior of the Gearbox, we will fit an XGBoost model on the training set (which is 80% of the modeling set). As mentioned in the section Variable selection, we will use the gearbox's oil temperature as the target variables and the gearbox's bearing temperature, the hydraulic oil temperature, the ambiant windspeed, the production power (active and reactive), the blade's pitch angle and the ambiant temperature as predictors. The fit is done only on turbine T01's gearbox and predict values for the validation set in order to evaluate the model. Lastly, we use the test data (i.e. the last 6 months of data) to test the model.
+
+It is worth mentioning that for turbine T01, no failures have been registered for the last 6 months of data.
+
+```{r, include=FALSE}
+#-- define gearbox variables
+gear_var = c("Datetime", 
+             "Turbine_ID", 
+             "Gear_Oil_Temp_Avg", 
+             "Gear_Bear_Temp_Avg", 
+             "Hyd_Oil_Temp_Avg",
+             "Amb_WindSpeed_Avg",
+             "Prod_LatestAvg_TotActPwr",
+             "Prod_LatestAvg_TotReactPwr",
+             "Blds_PitchAngle_Avg",
+             "Amb_Temp_Avg")
+
+#-- select gearbox variables
+df_model_gear = df_model %>% 
+  select(all_of(gear_var)) %>%
+  filter(Turbine_ID == "T01")
+
+#-- train-validation split
+idx_train = seq(1, floor(dim(df_model_gear)[1]*0.8))
+df_train_gear = df_model_gear[idx_train,]
+df_valid_gear = df_model_gear[-idx_train,]
+```
+
+```{r oil, fig.align='center', fig.width=8, fig.height=3, fig.cap="Plot of Turbine T01's gearbox's oil temperature in the training set", include=FALSE}
+#-- plot the target variable to see what it looks like
+ggplot(df_train_gear, aes(x = Datetime, y =Gear_Oil_Temp_Avg )) + 
+  geom_point(alpha = 0.1, size=0.7) + theme_bw() +
+  ggtitle("Gear Oil temperature average in time in Turbine T06") +
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) +
+  xlab("Date")+
+  ylab("Temperature value [degrees C]")+
+  theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.text = element_text(size = 6),
+        axis.text=element_text(size=6),
+        axis.title=element_text(size=8,face="bold"))
+```
+
+```{r}
+#-- select the training features and target as a matrix and a vector 
+X_train_gear = df_train_gear %>%
+  droplevels() %>%
+  select(-Gear_Oil_Temp_Avg, -Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_train_gear = df_train_gear %>% 
+  pull(Gear_Oil_Temp_Avg)
+
+#-- select the testing features and target as a matrix and a vector 
+X_valid_gear = df_valid_gear %>%
+  select(-Gear_Oil_Temp_Avg, - Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_valid_gear = df_valid_gear %>%
+  pull(Gear_Oil_Temp_Avg)
+
+#-- detect number of cores for parallel computing, we have 32! (we use half)
+n = detectCores()
+
+#-- train xgboost model
+gear_xgb = xgboost(
+  data = X_train_gear,
+  label = Y_train_gear,
+  verbose = 0,
+  nrounds = 2000,                 #-- max number of boosting iterations
+  params = list (eta = 0.2,       #-- learning rate for the gradient descent step
+                 nthread = n/2)   #-- for parallel computing on 6 cores
+)
+```
+
+## Predicting failures
+
+Predicting failures after we define boundaries of the normal behavior of the turbine using the model's output is discussed herein.
+In order to capture abnormal behavior, we will first fix a threshold based on which we classify the residuals as abnormal. To do so we consider the maximum norm $\ell_{\infty}$ of the residuals in the validation set as the normal behavior boundaries.
+
+To formulate the problem at hand, let $n$ be the number of observations and $\mathbf{x}$ a vector such that
+
+$$
+\mathbf{x} = (y_1 - \hat{y}_1, y_2 - \hat{y}_2, \cdots, y_n - \hat{y}_n )
+$$
+
+Where $y_i$ and $\hat{y}_i$ are the target variable and its prediction. The threshold to take would be defined as follows :
+
+$$
+\text {threshold} =  || \mathbf{x} ||_{\infty} = \text{max} (|\mathbf{x}_1|, |\mathbf{x}_2|, \cdots, |\mathbf{x}_n| )
+$$
+
+By examining the difference between observed and predicted values for the test set (on which we do not apply any preprocessing), we examine the data points that fall outside of the normal behavior envelope defined by the threshold above so as to capture abnormal behavior that occured in the last 6 months of data.
+
+```{r scat, out.width="35%", fig.cap="Demonstration of normal behavior boundaries and anomalies on the last 6 months of data", fig.align='center'}
+knitr::include_graphics(rep('~/Smart Data project/Report/Wind-Turbine-Report/Figures/boundaries.png'))
+```
+
+Figure \ref{fig:scat} illustrates an example of the normal behavior envelope and how it may help detect abnormal behavior if a data points falls outside its reach.
+
+In addition to the threshold, the previous preprocessing showed that the normal behavior boundaries of the gearbox oil temperature average is about 60 degrees. Therefore, an additional contraint will be applied as follows :
+
+$$
+\begin{cases}
+\text{If } y, \hat{y} \geq 60  &\rightarrow \text{ abnormal } \\
+\text{Otherwise} &\rightarrow \text{ normal}
+\end{cases}
+$$
+
+# Modeling results
+
+## Generator results
+
+## Gearbox results
+
+```{r}
+#-- get train prediction and evaluation metrics
+Y_train_pred_gear = predict(gear_xgb, newdata = X_train_gear)
+train_rmse_gear = rmse(Y_train_pred_gear, Y_train_gear)
+train_mae_gear = mae(Y_train_pred_gear, Y_train_gear)
+train_r2_gear = cor(Y_train_pred_gear, Y_train_gear)^2
+
+#-- get test predictions and evaluation metrics
+Y_valid_pred_gear = predict(gear_xgb, newdata = X_valid_gear)
+valid_rmse_gear = rmse(Y_valid_pred_gear, Y_valid_gear)
+valid_mae_gear = mae(Y_valid_pred_gear, Y_valid_gear)
+valid_r2_gear = cor(Y_valid_pred_gear, Y_valid_gear)
+
+#-- arrange results in a data frame
+results_train = data.frame(RMSE = train_rmse_gear, MAE = train_mae_gear, R2 = train_r2_gear)
+results_test =  data.frame(RMSE = valid_rmse_gear, MAE = valid_mae_gear, R2 = valid_r2_gear)
+results = bind_rows(results_train, results_test) %>% round(4)
+row.names(results) = c("Training set", "Validation set")
+
+#-- kable it
+knitr::kable(results, caption = "Evaluation metrics for T01's gearbox")
+```
+
+
+# Conclusion
+
+
