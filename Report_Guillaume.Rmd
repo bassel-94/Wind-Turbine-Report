@@ -8,12 +8,15 @@ output: pdf_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE)
 knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(dev = 'png')     #-- to reduce the size of the knitted pdf
 ```
 
 ```{r,include=FALSE}
 library(dplyr)
 library(ggplot2)
 library(gridExtra)
+library(tidyr)
+library(scales)
 ```
 
 
@@ -23,7 +26,7 @@ library(gridExtra)
 
 The data set used in our Smart Data project is SCADA (Supervisory Control And Data Acquisition) data acquired on four Wind Turbines, for the years 2016 and 2017.
 
-It consists in a collection of 83 variables, that are recorded every 10 minutes, and results in a data frame of more 400 000 observations, as there are some periods with no data recorded. One can find below the first observations of year 2016, for some variables of importance in our study.
+It consists in a collection of 83 variables, that are recorded every 10 minutes, and results in a data frame of more 400 000 observations, as there are some periods with no data recorded. One can find in Table \ref{tab:data_pres} below the first observations of year 2016, for some variables of importance in our study.
 
 ```{r,include=FALSE}
 data_2016<-read.csv2("Code/wind-farm-1-signals-2016.csv")
@@ -32,21 +35,21 @@ data_2016<-data_2016 %>% arrange(Timestamp)
 ```
 
 ```{r}
-knitr::kable(data_2016[1:6,c("Turbine_ID","Timestamp","Gen_RPM_Avg","Amb_WindSpeed_Avg","Gear_Bear_Temp_Avg")],caption = "First rows and some columns of the SCADA data", align = 'c')
+knitr::kable(data_2016[1:6,c("Turbine_ID","Timestamp","Gen_RPM_Avg","Amb_WindSpeed_Avg","Gear_Bear_Temp_Avg")],caption = "First rows and some columns of the SCADA data\\label{tab:data_pres}", align = 'c')
 ```
 
 Besides the identifier of the turbine and the timestamp, a majority of variables correspond to a measurement made on a turbine's component such as the generator, the gearbox, the hydraulic group, etc ... to which we add the total power production of the turbine and the wind speed. Each measurement in the data set is made onto the last ten minutes observed. 
 
 ### Failures
 
-In addition to this data set, we also have access to the failure logs of the turbines, where we can find the component that failed, the time the failure was found out, and some remarks made by the technician who observed the failure. We present below the first lines of these logs.
+In addition to this data set, we also have access to the failure logs of the turbines, where we can find the component that failed, the time the failure was found out, and some remarks made by the technician who observed the failure. We present in Table \ref{tab:failure_pres} below the first lines of these logs.
 
 ```{r,include=FALSE}
 failures<-read.csv2("Code/total-failures.csv")
 ```
 
 ```{r}
-knitr::kable(failures[1:5,],caption = "First rows of failure logs", align = 'c')
+knitr::kable(failures[1:5,],caption = "First rows of failure logs\\label{tab:failure_pres}", align = 'c')
 ```
 
 One can immediately observe that the generator is the most sensitive component, in the sense that it is the one which suffered the most failures, especially with turbine 6.
@@ -59,9 +62,9 @@ Note that the failure logs only stores the time when the failure was observed, n
 ## Data Preprocessing
 
 ```{r,include=FALSE}
-data_clean_1<-read.csv("Code/data_clean_1.csv",row.names = 1)
-data_clean_2<-read.csv("Code/data_clean_2.csv",row.names = 1)
-data_clean_3<-read.csv("Code/data_clean_3.csv",row.names = 1)
+data_clean_1<-read.csv("Code/data_clean_1.csv.gz")
+data_clean_2<-read.csv("Code/data_clean_2.csv.gz")
+data_clean_3<-read.csv("Code/data_clean_3.csv.gz")
 ```
 
 
@@ -72,13 +75,15 @@ As we mentioned previously, we intend to model the normal behavior of a turbine.
 
 Let us also recall that the data cleaning is only perform on the first 18 months of observations, since the last 6 months will be used as a testing set.
 
-## Univariate method
+### Univariate method
+
+TO BE REMOVED
 
 A first cleaning of our data set consists to detect outliers for each variable independently. We consider here that a value is an outlier if it is outside the bounds defined by the quantiles of order 0.5% and 99.5% of the variable considered. Whenever an outlier is detected this way, the entire observation (i.e. the entire row) is removed from the data set, as it is consider unreliable or at least unusual.
 
 Using this technique, we only removed the 1 943 most extreme observations. We still have to deal with a lot of variability in our data set, but a more restrictive criterion is used in the second method.
 
-## Multivariate method
+### Multivariate method
 
 In this part, we will work upon the data set obtained after removing the oultiers in the previous section.
 
@@ -123,7 +128,7 @@ print(p2)
 
 
 
-Finally, we fix a threshold of $50 \ kW/h$ for the residuals. Whenever a residual has an absolute value greater than this threshold, it is considered that the observed value is an outlier, and therefore removed from our clean data set. We can see on Figure \ref{fig:filter_comparison} below the obtained scatter plot of power production for the clean data set.
+Finally, we fix a threshold of $30 \ KW/h$ for the residuals. Whenever a residual has an absolute value greater than this threshold, it is considered that the observed value is an outlier, and therefore removed from our clean data set. We can see on Figure \ref{fig:filter_comparison} below the obtained scatter plot of power production for the clean data set.
 
 
 ```{r filter_comparison,fig.height=6,fig.width=15,fig.cap="\\label{fig:filter_comparison}Before Vs After multivariate outliers removal"}
@@ -143,8 +148,187 @@ grid.arrange(p1,p3,nrow=1)
 
 
 
-Note that 92 764 values have been removed during both steps of our cleaning, which corresponds to a diminution of 29,7% of the initial data set.
+Note that _NUMBER_ values have been removed during both steps of our cleaning, which corresponds to a diminution of _PERCENTAGE_% of the initial data set.
 
 However, if we are convinced that a lot of outliers have been removed, we cannot be sure that the clean data set does not contain any. Nevertheless, considering a value as an outlier can be sometimes subjective, we can reasonably consider that the data set that we will use for training our model contains a large majority of usual values, and is clean enough.
 
-## Modeling the normal behavior of the generator
+# Modeling results
+
+In this section, we will discuss the results obtained after training our models. We will also try to deal with our main concern : anomaly detection. Since the results are very different between the two components studied, this section is divided in two parts.
+
+## Generator results
+
+The first result we can comment is the goodness of fit of the regression made by the gradient boosting method `xgboost`. Indeed, the evaluation metrics after predicting the target values on both our training and validation sets are given in Table \ref{tab:metric_gen}.
+
+```{r}
+metric.gen<-matrix(c(2.6,1.79,0.9999,13.35,6.48,0.9990),nrow=2,byrow = TRUE)
+colnames(metric.gen)<-c("RMSE","MAE","R")
+rownames(metric.gen)<-c("Training set","Validation set")
+metric.gen<-as.data.frame(metric.gen)
+knitr::kable(metric.gen,caption = "Evaluation of the fit for Gen_RPM_Avg\\label{tab:metric_gen}", align = 'c')
+```
+
+
+We can see on Figure \ref{fig:gof_gen} how precise our fit is.
+
+```{r gof_gen,fig.cap="\\label{fig:gof_gen}Observed Vs Predicted values of Gen_RPM_Avg", fig.height=6, fig.width=15, warning=FALSE}
+#-- build data frames of predicted and observed values of train and test data
+
+g1<-read.csv("Code/data_valid_gen.csv.gz")
+g2<-read.csv("Code/data_train_gen.csv.gz")
+
+#-- plot predicted values against real values and see if its linear
+p1 = ggplot(g1, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in validation set Gen_RPM_Avg") + 
+  geom_smooth(method='lm', formula = y~x, color = "steelblue") +
+  geom_line(aes(y = predicted), size = 1, color = "red", linetype = "dashed")
+
+p2 = ggplot(g2, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in training set Gen_RPM_Avg")+ 
+  geom_smooth(method='lm', formula = y~x, color = "steelblue") +                        #-- the linear regression line
+  geom_abline(intercept = 0, slope = 1, size = 1, color = "red", linetype = "dashed") + #-- the slope line (y=x)
+  scale_color_discrete(name = "Type", labels = c("lm line", "slope"))
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+Once the model built, we study the residuals obtained on the validation set, which could give us some clues to fix a good threshold in our problem of anomaly detection. We obtain a standard deviation of $\sigma_{gen} \approx 16.35$ for a distribution of the residuals actually close to a centered normal law  histogram?(see Figure _NUM Figure_).
+
+A naive threshold could therefore be : $thresh =3\times \sigma_{gen} \approx 50$, and this is the one that we fix from now on.
+
+If the model is very accurate on a clean data set, we still have to know how it behaves on an unprocessed one. By evaluating our model on the test set, i.e. the one with the last unprocessed six months, we get the results stored in Table \ref{tab:test_gen}.
+
+```{r}
+metric.test.gen<-matrix(c(241.73,126.89,0.9968),nrow=1,byrow = TRUE)
+colnames(metric.test.gen)<-c("RMSE","MAE","R")
+rownames(metric.test.gen)<-c("Test set")
+metric.test.gen<-as.data.frame(metric.test.gen)
+knitr::kable(metric.test.gen,caption = "Evaluation of the fit for Gen_RPM_Avg\\label{tab:test_gen}", align = 'c')
+```
+
+The evaluation metrics are obviously not as good as for a clean data set, which is normal.
+
+In Figure \ref{fig:gen_test}, we can observe that the fit on the test set is nevertheless quite good, but the model has a lot of difficulties to fit the low values of the Generator RPM (less than 500 RPM).
+
+```{r gen_test,fig.width=4, fig.height=3, warning=FALSE,fig.cap="\\label{fig:gen_test}Observed Vs Predicted Gen_RPM_Avg values in test set"}
+#-- build data frames of predicted and observed values of train and test data
+g3 = read.csv("Code/data_test_gen.csv.gz")
+#write.csv(g3, file=gzfile("data_test_gen.csv.gz"), row.names = FALSE)
+
+#-- plot predicted values against real values and see if its linear
+ggplot(g3, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() #+
+  #ggtitle("Observed vs predicted values in validation set Gen_RPM_avg")
+```
+
+By declaring as an anomaly each value for which the residual exceeds the threshold, we obtain 8 184 out of 26 095 abnormal values in the test set, for turbine 06, that are spotted on Figure \ref{fig:gen_anom}.
+
+```{r gen_anom, fig.width=15, fig.height=6,fig.cap="\\label{fig:gen_anom}Predicted anomalies by thresholding on the Generator"}
+df_gen_pred_thresh<-read.csv("Code/data_anomalies_gen.csv.gz")
+
+df_gen_pred_thresh$Datetime <-as.POSIXct(df_gen_pred_thresh$Datetime, format="%Y-%m-%d")
+
+p2 = df_gen_pred_thresh %>%
+  select(Gen_RPM_Avg,Predict_RPM, Datetime, -Amb_Temp_Avg) %>%
+  gather(key = "Variables", value = "values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=values, color = Variables)) +
+  geom_point(alpha = 0.5) + 
+ #ggtitle("Anomalies predicted by our threshold method") + 
+  theme_bw() +
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month"))
+
+p2
+```
+
+Recall that for this period, no failure has been declared on this turbine, which naturally questions the good definition of our threshold. This problem will be discuss further in _CONCLUSION_.
+
+## Gearbox results
+
+Once again, we start with the goodness of fit of the regression made by the gradient boosting method `xgboost`. The evaluation metrics after predicting the target values on both our training and validation sets are sored in Table \ref{tab:gof_gear}.
+
+```{r}
+metric.gear<-matrix(c(0.22,0.16,0.9980,1.02,0.76,0.9732),nrow=2,byrow = TRUE)
+colnames(metric.gear)<-c("RMSE","MAE","R")
+rownames(metric.gear)<-c("Training set","Validation set")
+metric.gear<-as.data.frame(metric.gear)
+knitr::kable(metric.gear,caption = "Evaluation of the fit for Gear_Oil_Temp_Avg\\label{tab:gof_gear}", align = 'c')
+```
+
+
+We can see on Figure \ref{fig:gof_gear} how precise our fit is.
+
+```{r gof_gear, fig.width=15, fig.height=6, warning=FALSE,fig.cap="\\label{fig:gof_gear}Observed Vs Predicted Gear_Oil_Temp_Avg values"}
+#-- build data frames of predicted and observed values of train and test data
+g1<-read.csv("Code/data_valid_gear.csv.gz")
+g2<-read.csv("Code/data_train_gear.csv.gz")
+
+#-- plot predicted values against real values and see if its linear
+p1 = ggplot(g1, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in validation set Gear_Oil_Temp") + 
+  geom_smooth(method='lm', formula = y~x, color = "steelblue") +
+  geom_line(aes(y = predicted), size = 1, color = "red", linetype = "dashed")
+
+p2 = ggplot(g2, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in training set Gear_Oil_Temp")+ 
+  geom_smooth(method='lm', formula = y~x, color = "steelblue") +                        #-- the linear regression line
+  geom_abline(intercept = 0, slope = 1, size = 1, color = "red", linetype = "dashed") + #-- the slope line (y=x)
+  scale_color_discrete(name = "Type", labels = c("lm line", "slope"))
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+We then study the residuals obtained on the validation set, and obtain a standard deviation of $\sigma_{gear} \approx 1.02$ for a distribution of the residuals once again close to a centered normal law  histogram?(see Figure _NUM Figure_).
+
+A naive threshold could therefore be : $thresh =3\times \sigma_{gear} \approx 3.1$, and this is the one that we fix from now on.
+
+By evaluating our model on the test set, we get the results presented in Table \ref{tab:test_gear}.
+
+```{r}
+metric.test.gear<-matrix(c(1.34,0.96,0.9771),nrow=1,byrow = TRUE)
+colnames(metric.test.gear)<-c("RMSE","MAE","R")
+rownames(metric.test.gear)<-c("Test set")
+metric.test.gear<-as.data.frame(metric.test.gear)
+knitr::kable(metric.test.gear,caption = "Evaluation of the fit for Gear_Oil_Temp_Avg\\label{tab:test_gear}", align = 'c')
+```
+
+Here, the evaluation metrics behave quite well in our test set, at least much better than for the generator. This fact will be discussed in the conclusion.
+
+In Figure \ref{fig:gear_test}, we can observe that the fit on the test set is different from the generator one, but maybe more consistent in the sense than the scatter plot has a more convex shape.
+
+```{r gear_test, fig.width=4, fig.height=3, warning=FALSE,fig.cap="\\label{fig:gear_test} Observed Vs Predicted Gear_Oil_Temp_Avg values in test set"}
+#-- build data frames of predicted and observed values of train and test data
+g3 = read.csv("Code/data_test_gear.csv.gz")
+
+#-- plot predicted values against real values and see if its linear
+ggplot(g3, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() #+
+  #ggtitle("Observed vs predicted values in validation set Gear_Oil_Temp") #+ 
+  #geom_abline(slope = 1, intercept = 5.6, color = "red") +
+  #geom_abline(slope = 1, intercept = -5.6, color = "red") +
+  #geom_segment(aes(x=54,xend=65,y=60,yend=60), color = "red") + 
+  #geom_segment(aes(x=21,xend=33,y=27,yend=27), color = "red")
+```
+
+
+Recall that, according to _PAPER CITATION_, if the temperature of the oil of the gearbox goes beyond 60 degrees Celsius, then it is abnormal. We thus declare as an anomaly each value for which the residual exceeds the threshold or the temperature exceeds the 60 degrees limit. We obtain 881 out of 26 019 anomalies in the test set, for turbine 01, that are spotted on Figure \ref{fig:gear_anom}.
+
+```{r gear_anom, fig.width=15, fig.height=6,fig.cap="\\label{fig:gear_anom}Predicted anomalies by thresholding on the Gearbox"}
+df_pred_thresh<-read.csv("Code/data_anomalies_gear.csv.gz")
+
+df_pred_thresh$Datetime <-as.POSIXct(df_pred_thresh$Datetime, format="%Y-%m-%d")
+
+p2 = df_pred_thresh %>%
+  select(Gear_Oil_Temp_Avg,Predict_Temp, Datetime, -Amb_Temp_Avg) %>%
+  gather(key = "Variables", value = "values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=values, color = Variables)) + 
+  geom_point(alpha = 0.5) +
+  #ggtitle("Anomalies predicted by our threshold method") +
+  theme_bw() + 
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  geom_hline(yintercept = 60, color = "red")
+p2
+```
