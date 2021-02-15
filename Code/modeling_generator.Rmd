@@ -1,0 +1,394 @@
+---
+title: "Modeling Normal Behavior of generator"
+output: pdf_document
+html_notebook: default
+---
+
+# Prerequesites
+
+The aim of the this notebook is to go through some modeling techniques in order to classify unhealthy behavior of the wind turbines.
+The model evaluation technique will be based on the RMSE of the test set. The steps we will go through in this notebook are represented below: 
+
+* Read and split the clean data according to 70-30 ratio (70% for training and 30% for testing)
+* Fit a gradient boosting model on the training set and validate the model
+* Use evaluation metrics such as RMSE and R-squared to help determine the best model (and do feature selection).
+* Once the model is trained and validated, we test the model by predicting the failures on the un-processed data.
+
+- The first approach is to use an isolation forest on a portion of the total data with without any preprocessing. The aim of this approach is to see whether we are able to detect anomalies/failures in the original data set.
+
+- The second approach is to model normal behavior of turbines using the training data from the previous notebook and predict failure values in the test data (that is un-filtered). 
+The target variable will be Gen_RPM_Avg and both train and test data will be normalized.
+
+```{r, warning = FALSE, echo = FALSE, include=FALSE}
+rm(list=ls())
+library(ensaiWind)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(lubridate)
+library(ggplot2)
+library(anomalize)
+library(vip)
+library(Metrics)
+library(xgboost)
+library(scales)
+library(parallel)
+library(gridExtra)
+source("functions.R")
+```
+
+Recall that the variables we will use for modeling the normal behavior of the generator are :
+
+Gen_RPM_Avg, <- our target
+Amb_WindSpeed_Avg,
+Prod_LatestAvg_TotActPwr,
+Prod_LatestAvg_TotReactPwr,
+Nac_Temp_Avg,
+Gen_Bear_Temp_Avg,
+Gen_Phase1_Temp_Avg,
+and Amb_Temp_Avg,
+and Blds pitch angle ???? ==> Seems to have a high correlation
+
+RMK : We only choose one Tenperature for the Generator phases, since the correlation between the three are highly correlated.
+
+
+
+```{r, include=FALSE}
+#-- read the clean data and select gearbox variables
+df_gen = read_csv("filtered_data.csv.gz") %>% 
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  select(Datetime,
+         Turbine_ID,
+         Gen_RPM_Avg,
+         Amb_WindSpeed_Avg,
+         Prod_LatestAvg_TotActPwr, 
+         Prod_LatestAvg_TotReactPwr,
+         Nac_Temp_Avg,
+         Gen_Bear_Temp_Avg,
+         Gen_Phase1_Temp_Avg,
+         Amb_Temp_Avg,
+         Blds_PitchAngle_Avg) %>%
+  filter(Turbine_ID=="T06")
+
+#-- TO REMOVE :
+
+#data_clean_3<-read.csv("data_clean_3.csv")
+
+#-- train-validation split
+idx_train = seq(1, floor(dim(df_gen)[1]*0.8))
+df_gen_train = df_gen[idx_train,]
+df_gen_valid = df_gen[-idx_train,]
+```
+
+We train our xgboost model :
+
+```{r}
+#-- select the training features and target as a matrix and a vector 
+X_gen_train = df_gen_train %>%
+  select(-Gen_RPM_Avg, -Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_gen_train = df_gen_train %>% 
+  pull(Gen_RPM_Avg)
+
+#-- select the testing features and target as a matrix and a vector 
+X_gen_valid = df_gen_valid %>%
+  select(-Gen_RPM_Avg, - Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_gen_valid = df_gen_valid %>%
+  pull(Gen_RPM_Avg)
+
+#-- detect number of cores for parallel computing, we have 32! (we use half)
+n = detectCores()
+
+#-- train xgboost model
+gen_xgb = xgboost(
+  data = X_gen_train,
+  label = Y_gen_train,
+  verbose = 0,
+  nrounds = 2000,                 #-- max number of boosting iterations
+  params = list (eta = 0.2,       #-- learning rate for the gradient descent step
+                 nthread = 10)   #-- for parallel computing on 10 cores
+)
+```
+
+
+```{r}
+#-- get train prediction and evaluation metrics
+Y_gen_train_pred = predict(gen_xgb, newdata = X_gen_train)
+train_gen_rmse = rmse(Y_gen_train_pred, Y_gen_train)
+train_gen_mae = mae(Y_gen_train_pred, Y_gen_train)
+train_gen_r2 = cor(Y_gen_train_pred, Y_gen_train)^2
+
+cat("train RMSE is", train_gen_rmse, "\n")
+cat("train MAE is", train_gen_mae, "\n")
+cat("train R2 is", train_gen_r2, "\n")
+
+#-- get test predictions and evaluation metrics
+Y_gen_valid_pred = predict(gen_xgb, newdata = X_gen_valid)
+valid_gen_rmse = rmse(Y_gen_valid_pred, Y_gen_valid)
+valid_gen_mae = mae(Y_gen_valid_pred, Y_gen_valid)
+valid_gen_r2 = cor(Y_gen_valid_pred, Y_gen_valid)
+
+cat("\nvalidation RMSE is", valid_gen_rmse, "\n")
+cat("validation MAE is", valid_gen_mae, "\n")
+cat("validation R2 is", valid_gen_r2, "\n")
+```
+
+
+```{r, fig.width=12, fig.height=6, warning=FALSE}
+#-- build data frames of predicted and observed values of train and test data
+g1 = data.frame(observed = df_gen_valid$Gen_RPM_Avg, predicted = Y_gen_valid_pred)
+g2 = data.frame(observed = df_gen_train$Gen_RPM_Avg, predicted = Y_gen_train_pred)
+
+#write.csv(g1, file=gzfile("data_valid_gen.csv.gz"), row.names = FALSE)
+#write.csv(g2, file=gzfile("data_train_gen.csv.gz"), row.names = FALSE)
+
+#-- plot predicted values against real values and see if its linear
+p1 = ggplot(g1, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in validation set Gen_RPM_Avg") + 
+  geom_smooth(method='lm', formula = y~x, color = "steelblue") +
+  geom_line(aes(y = predicted), size = 1, color = "red", linetype = "dashed")
+
+p2 = ggplot(g2, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in training set Gen_RPM_Avg")+ 
+  geom_smooth(method='lm', formula = y~x, color = "steelblue") +                        #-- the linear regression line
+  geom_abline(intercept = 0, slope = 1, size = 1, color = "red", linetype = "dashed") + #-- the slope line (y=x)
+  scale_color_discrete(name = "Type", labels = c("lm line", "slope"))
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+
+CHECK FOR LOW VALUES (IF NO WIND, COULD BE REMOVED)
+
+To get a feature importance plot, we do the following :
+
+```{r, fig.width=10, fig.height=4, warning=FALSE, fig.align='center'}
+vip::vip(gen_xgb) + theme_bw() + ggtitle("Feature importance of the generator")
+```
+
+We can also plot the residual's histogram for the training set :
+
+```{r}
+res_train=Y_gen_train_pred - Y_gen_train
+res_valid=Y_gen_valid_pred - Y_gen_valid
+hist(res_train,xlim = c(-30,30),freq = FALSE)
+quantile(res_valid,probs=c(0.025,0.975))
+sd(res_valid)
+sd(res_train)
+```
+
+
+## Normal behavior boundaries according to the threshold
+
+To test the algorithm, we will predict an abnormal behavior on the test data (the last 6 months of data) according to the fixed threshold above
+
+```{r, include=FALSE}
+#-- read the unfiltered data and select gearbox variables
+df_gen_test = read_csv("unfiltered_data.csv.gz") %>% 
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  select(Datetime,
+         Turbine_ID,
+         Gen_RPM_Avg,
+         Amb_WindSpeed_Avg,
+         Prod_LatestAvg_TotActPwr, 
+         Prod_LatestAvg_TotReactPwr,
+         Nac_Temp_Avg,
+         Gen_Bear_Temp_Avg,
+         Gen_Phase1_Temp_Avg,
+         Amb_Temp_Avg,
+         Blds_PitchAngle_Avg) %>%
+  filter(Turbine_ID=="T06") %>%
+  as_tibble() 
+
+#-- get the test features and the test target as a matrix and a vector
+X_gen_test = df_gen_test %>% 
+  select(-Datetime, -Gen_RPM_Avg, -Turbine_ID) %>%
+  as.matrix()
+
+Y_gen_test = df_gen_test %>%
+  pull(Gen_RPM_Avg)
+```
+
+```{r}
+#-- get predictions and compute evaluation metrics
+Y_gen_test_pred = predict(gen_xgb, newdata = X_gen_test)
+test_gen_rmse = rmse(Y_gen_test_pred, Y_gen_test)
+test_gen_mae = mae(Y_gen_test_pred, Y_gen_test)
+test_gen_r2 = cor(Y_gen_test_pred, Y_gen_test)
+
+cat("Test RMSE is", test_gen_rmse, "\n")
+cat("Test MAE is", test_gen_mae, "\n")
+cat("Test R2 is", test_gen_r2, "\n")
+```
+
+
+We visualize the results below and add lines according to the thresholds we fixed to represent the normal behavior boundaries
+
+```{r, fig.width=8, fig.height=6, warning=FALSE}
+#-- build data frames of predicted and observed values of train and test data
+g3 = data.frame(observed = df_gen_test$Gen_RPM_Avg, predicted = Y_gen_test_pred)
+#write.csv(g3, file=gzfile("data_test_gen.csv.gz"), row.names = FALSE)
+
+#-- plot predicted values against real values and see if its linear
+ggplot(g3, aes(x=predicted, y=observed)) + 
+  geom_point(alpha = 0.05) + theme_bw() +
+  ggtitle("Observed vs predicted values in validation set Gen_RPM_avg")
+```
+
+
+```{r}
+thresh=50
+df_gen_pred = df_gen_test %>%
+  mutate(Predict_RPM = Y_gen_test_pred,
+         Max_Diff = abs(Predict_RPM - Gen_RPM_Avg))
+
+df_gen_pred_thresh = df_gen_pred %>%
+  filter(Max_Diff>thresh)
+
+anomalies_gen<-df_gen_pred$Datetime[which(df_gen_pred$Max_Diff >thresh)]
+
+cat(dim(df_gen_pred_thresh)[1], "anomalies have been predicted using the threshold method")
+
+#write.csv(df_gen_pred_thresh, file=gzfile("data_anomalies_gen.csv.gz"), row.names = FALSE)
+```
+
+We can plot the anomalies predicted as follow:
+
+```{r, fig.width=12, fig.height=5, fig.align='center'}
+p2 = df_gen_pred_thresh %>%
+  #select(Amb_WindSpeed_Avg,Gen_RPM_Avg,Predict_RPM, Datetime, -Amb_Temp_Avg) %>%
+  select(Amb_WindSpeed_Avg,Datetime) %>%
+  gather(key = "Variables", value = "values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=values, color = Variables)) + 
+  geom_point(alpha = 0.5) + ggtitle("Anomalies predicted by our threshold method") + theme_bw() + 
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month"))
+  #geom_vline(xintercept=as.POSIXct("11-08-2017",format="%d-%m-%Y"), linetype='dashed', color='blue', size=1)+
+  #geom_vline(xintercept=as.POSIXct("19-08-2017",format="%d-%m-%Y"), linetype='dashed', color='blue', size=1)+
+  #geom_vline(xintercept=as.POSIXct("20-08-2017",format="%d-%m-%Y"), linetype='dashed', color='blue', size=1)+
+  #geom_vline(xintercept=as.POSIXct("21-08-2017",format="%d-%m-%Y"), linetype='dashed', color='blue', size=1)
+  #geom_vline(xintercept=as.POSIXct("12-09-2017",format="%d-%m-%Y"), linetype='dashed', color='blue', size=1)+
+  #geom_vline(xintercept=as.POSIXct("16-09-2017",format="%d-%m-%Y"), linetype='dashed', color='blue', size=1)+
+  #geom_vline(xintercept=as.POSIXct("18-10-2017",format="%d-%m-%Y"), linetype='dashed', color='blue', size=1)+
+  #geom_vline(xintercept=as.POSIXct("19-10-2017",format="%d-%m-%Y"), linetype='dashed', color='blue', size=1)
+  
+p2
+
+
+```
+
+## Detect anomalies using the TS decomposition
+
+If we apply the time series decomposition method on the original data (to maintain the structure of all 2 years of data if there is any seasonality envolved) and get the anomalies that only happened in dates of the test data, we find the following:
+
+```{r}
+#-- load the 2016 and 2017 production data
+data_2016 = read.csv2("wind-farm-1-signals-2016.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
+  select(-Timestamp) %>%
+  arrange(Datetime)
+
+data_2017 = read.csv2("data_wind_prod.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
+  select(-Timestamp) %>%
+  arrange(Datetime)
+
+#-- bind data
+data_total = bind_rows(data_2016,data_2017) %>% 
+  arrange(Datetime) %>% 
+  na.omit() %>%
+  #select(names(df_gen)) %>% 
+  as_tibble()
+
+#-- display anomalies using the TS decomposition on all 2 years of data and filter only the test dates
+d = data_total %>%
+  find_my_anomalies_ts() #%>%
+  #filter(Datetime > as.POSIXct("2017-07-02 11:10:00",format="%Y-%m-%d %H:%M:%OS"))    #-- to get only the dates of the test set
+
+cat(dim(d)[1], "anomalies have been found in the test set")
+```
+
+We found 1475 anomalies using the Times Series decomposition. We can visualize these points as follows :
+
+```{r, fig.width=12, fig.height=8, fig.align='center'}
+p1 = d %>%
+  select(contains("Temp"), Datetime, -Amb_Temp_Avg) %>%
+  gather(key = "Variables", value = "values", -Datetime) %>% 
+  ggplot(aes(x=Datetime, y=values, color = Variables)) + 
+  geom_point(alpha = 0.5) + ggtitle("Anomalies detected by the time series decomposition method") + theme_bw() + 
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
+  geom_hline(yintercept = 60, color = "red")
+
+grid.arrange(p1,p2)
+```
+
+```{r}
+diff_anoms = anti_join(d, df_pred, by = c("Datetime", "Turbine_ID"))
+cat("Out of the", dim(d)[1], "anomalies detected by the TS decomposition, only", dim(d)[1]-dim(diff_anoms)[1],"have been detected using xgboost")
+```
+
+## Comparing predicted anomalies with the actual failures
+
+Are they comparable to the actual failure logs?
+
+```{r}
+#-- load the 2016 and 2017 failure data
+failure_2016 = read.csv2("htw-failures-2016.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
+  select(-Timestamp)
+
+failure_2017 = read.csv2("htw-failures-2017.csv", header = T, dec = ".", sep = ";") %>%
+  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
+         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>% select(-Timestamp)
+
+#-- bind data
+failure_total = rbind(failure_2016, failure_2017) %>% arrange(Datetime)
+failure_total %>% filter(Component == "GEARBOX")
+```
+
+```{r}
+df_pred_thresh
+```
+
+The answer is no. They are not comparable. Two gearbox failures happened.
+
+Check what the data looks like for these two dates of failures
+
+```{r, fig.width=16, fig.height=6, fig.align='center'}
+df_test %>% 
+  select(Datetime, contains("Temp")) %>%
+  gather(key = "Variable", value = "Values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=Values, col = Variable)) + geom_point(alpha = 0.5) +
+  theme_bw() + ggtitle("Gearbox variables") + 
+  geom_vline(xintercept = failure_total %>% filter(Component == "GEARBOX") %>% pull(Datetime))
+```
+
+## Alternative solutions
+
+Can we re-use the time series decomposition again on the predicted values of the xgboost to predict failures instead of fixing a threshold? 
+
+```{r, fig.align='center', fig.width=16, fig.height=6}
+test = df_pred %>%
+  as_tibble() %>%
+  time_decompose(Predict_Temp, method = "stl", frequency = "auto", trend = "auto", message = FALSE) %>%
+  anomalize(remainder)
+
+test %>% plot_anomalies(alpha_dots = 0.5, size_circles = 3.5, alpha_circles = 0.5) + ggtitle("Anomalies of predicted the gear oil temperature using xgboost")
+```
+
+How many have we captured ? more than 1840 anomalies ! so even more than the original TS decomposition on the observed values!
+
+```{r}
+predicted_anoms = test %>% 
+  filter(anomaly == "Yes") %>% 
+  select(Datetime, observed) %>% 
+  rename(Gear_Oil_Temp_Avg = observed) %>% 
+  as_tibble()
+```
