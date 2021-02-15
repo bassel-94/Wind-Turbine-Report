@@ -70,10 +70,6 @@ df_gen = read_csv("filtered_data.csv.gz") %>%
          Blds_PitchAngle_Avg) %>%
   filter(Turbine_ID=="T06")
 
-#-- TO REMOVE :
-
-#data_clean_3<-read.csv("data_clean_3.csv")
-
 #-- train-validation split
 idx_train = seq(1, floor(dim(df_gen)[1]*0.8))
 df_gen_train = df_gen[idx_train,]
@@ -83,7 +79,7 @@ df_gen_valid = df_gen[-idx_train,]
 ## GAM Model
 
 ```{r}
-library(gam)
+if (! require(gam)) install.packages("gam")
 #-- select the training features and target as a matrix and a vector 
 X_gen_train = df_gen_train %>%
   select(-Gen_RPM_Avg, -Datetime, -Turbine_ID) %>%
@@ -214,9 +210,6 @@ X_gen_valid = df_gen_valid %>%
 
 Y_gen_valid = df_gen_valid %>%
   pull(Gen_RPM_Avg)
-
-#-- detect number of cores for parallel computing, we have 32! (we use half)
-n = detectCores()
 
 #-- train xgboost model
 gen_xgb = xgboost(
@@ -402,24 +395,11 @@ p2
 If we apply the time series decomposition method on the original data (to maintain the structure of all 2 years of data if there is any seasonality envolved) and get the anomalies that only happened in dates of the test data, we find the following:
 
 ```{r}
-#-- load the 2016 and 2017 production data
-data_2016 = read.csv2("wind-farm-1-signals-2016.csv", header = T, dec = ".", sep = ";") %>%
-  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
-         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
-  select(-Timestamp) %>%
-  arrange(Datetime)
-
-data_2017 = read.csv2("data_wind_prod.csv", header = T, dec = ".", sep = ";") %>%
-  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
-         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
-  select(-Timestamp) %>%
-  arrange(Datetime)
-
-#-- bind data
-data_total = bind_rows(data_2016,data_2017) %>% 
-  arrange(Datetime) %>% 
-  na.omit() %>%
-  #select(names(df_gen)) %>% 
+#-- load original data
+data_total = read_csv("original_data.csv.gz") %>% 
+  mutate(Turbine_ID = as.factor(Turbine_ID)) %>%
+  filter(Turbine_ID == "T01") %>%
+  droplevels() %>%
   as_tibble()
 
 #-- display anomalies using the TS decomposition on all 2 years of data and filter only the test dates
@@ -430,7 +410,7 @@ d = data_total %>%
 cat(dim(d)[1], "anomalies have been found in the test set")
 ```
 
-We found 1475 anomalies using the Times Series decomposition. We can visualize these points as follows :
+We found 5427 anomalies using the Times Series decomposition. We can visualize these points as follows :
 
 ```{r, fig.width=12, fig.height=8, fig.align='center'}
 p1 = d %>%
@@ -438,73 +418,28 @@ p1 = d %>%
   gather(key = "Variables", value = "values", -Datetime) %>% 
   ggplot(aes(x=Datetime, y=values, color = Variables)) + 
   geom_point(alpha = 0.5) + ggtitle("Anomalies detected by the time series decomposition method") + theme_bw() + 
-  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) + 
-  geom_hline(yintercept = 60, color = "red")
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month"))
 
 grid.arrange(p1,p2)
 ```
 
-```{r}
-diff_anoms = anti_join(d, df_pred, by = c("Datetime", "Turbine_ID"))
-cat("Out of the", dim(d)[1], "anomalies detected by the TS decomposition, only", dim(d)[1]-dim(diff_anoms)[1],"have been detected using xgboost")
-```
+TO DO : Cross check anomalies detected by TS decomposition with the ones detected by our threshold method.
 
-## Comparing predicted anomalies with the actual failures
 
-Are they comparable to the actual failure logs?
+We can plot the actual values predicted in time along with the observed values in the test set.
 
 ```{r}
-#-- load the 2016 and 2017 failure data
-failure_2016 = read.csv2("htw-failures-2016.csv", header = T, dec = ".", sep = ";") %>%
-  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
-         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>%
-  select(-Timestamp)
-
-failure_2017 = read.csv2("htw-failures-2017.csv", header = T, dec = ".", sep = ";") %>%
-  mutate(Timestamp = paste0(substr(Timestamp, 1, 10), " ", substr(Timestamp, 12, 19)),
-         Datetime = as.POSIXct(Timestamp, "%Y-%m-%d %H:%M:%S", tz = "Europe/Paris")) %>% select(-Timestamp)
-
-#-- bind data
-failure_total = rbind(failure_2016, failure_2017) %>% arrange(Datetime)
-failure_total %>% filter(Component == "GEARBOX")
-```
-
-```{r}
-df_pred_thresh
-```
-
-The answer is no. They are not comparable. Two gearbox failures happened.
-
-Check what the data looks like for these two dates of failures
-
-```{r, fig.width=16, fig.height=6, fig.align='center'}
-df_test %>% 
-  select(Datetime, contains("Temp")) %>%
-  gather(key = "Variable", value = "Values", -Datetime) %>%
-  ggplot(aes(x=Datetime, y=Values, col = Variable)) + geom_point(alpha = 0.5) +
-  theme_bw() + ggtitle("Gearbox variables") + 
-  geom_vline(xintercept = failure_total %>% filter(Component == "GEARBOX") %>% pull(Datetime))
-```
-
-## Alternative solutions
-
-Can we re-use the time series decomposition again on the predicted values of the xgboost to predict failures instead of fixing a threshold? 
-
-```{r, fig.align='center', fig.width=16, fig.height=6}
-test = df_pred %>%
-  as_tibble() %>%
-  time_decompose(Predict_Temp, method = "stl", frequency = "auto", trend = "auto", message = FALSE) %>%
-  anomalize(remainder)
-
-test %>% plot_anomalies(alpha_dots = 0.5, size_circles = 3.5, alpha_circles = 0.5) + ggtitle("Anomalies of predicted the gear oil temperature using xgboost")
-```
-
-How many have we captured ? more than 1840 anomalies ! so even more than the original TS decomposition on the observed values!
-
-```{r}
-predicted_anoms = test %>% 
-  filter(anomaly == "Yes") %>% 
-  select(Datetime, observed) %>% 
-  rename(Gear_Oil_Temp_Avg = observed) %>% 
-  as_tibble()
+df_gen_pred_thresh %>%
+  select(Gen_RPM_Avg,Predict_RPM, Datetime, -Amb_Temp_Avg) %>%
+  gather(key = "Variables", value = "values", -Datetime) %>%
+  ggplot(aes(x=Datetime, y=values, color = Variables)) +
+  geom_point(alpha = 0.5, size = 0.7) + 
+  #ggtitle("Anomalies predicted by our threshold method") + 
+  theme_bw() +
+  scale_x_datetime(date_labels = "%Y-%m-%d", breaks = date_breaks("1 month")) +
+  theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.6), 
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.text = element_text(size = 6),
+        axis.text=element_text(size=6),
+        axis.title=element_text(size=8,face="bold"))
 ```
