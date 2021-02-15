@@ -80,6 +80,122 @@ df_gen_train = df_gen[idx_train,]
 df_gen_valid = df_gen[-idx_train,]
 ```
 
+## GAM Model
+
+```{r}
+library(gam)
+#-- select the training features and target as a matrix and a vector 
+X_gen_train = df_gen_train %>%
+  select(-Gen_RPM_Avg, -Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_gen_train = df_gen_train %>% 
+  pull(Gen_RPM_Avg)
+
+#-- select the testing features and target as a matrix and a vector 
+X_gen_valid = df_gen_valid %>%
+  select(-Gen_RPM_Avg, - Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_gen_valid = df_gen_valid %>%
+  pull(Gen_RPM_Avg)
+
+#-- train Random forest model
+
+df_gam_train <-data.frame(X_gen_train,Y_gen_train)
+
+gen_gam<-gam(formula = Y_gen_train~s(Amb_WindSpeed_Avg)+
+               s(Prod_LatestAvg_TotActPwr)+
+               s(Prod_LatestAvg_TotReactPwr)+
+               s(Nac_Temp_Avg)+
+               s(Gen_Bear_Temp_Avg)+
+               s(Gen_Phase1_Temp_Avg)+
+               s(Amb_Temp_Avg)+
+               s(Blds_PitchAngle_Avg),data = df_gam_train)
+```
+```{r}
+#-- get train prediction and evaluation metrics
+Y_gen_train_pred = predict(gen_gam, newdata = df_gam_train)
+train_gen_rmse = rmse(Y_gen_train_pred, Y_gen_train)
+train_gen_mae = mae(Y_gen_train_pred, Y_gen_train)
+train_gen_r2 = cor(Y_gen_train_pred, Y_gen_train)^2
+
+cat("train RMSE is", train_gen_rmse, "\n")
+cat("train MAE is", train_gen_mae, "\n")
+cat("train R2 is", train_gen_r2, "\n")
+
+df_gam_valid<-data.frame(X_gen_valid,Y_gen_valid)
+
+#-- get test predictions and evaluation metrics
+Y_gen_valid_pred = predict(gen_gam, newdata = df_gam_valid)
+valid_gen_rmse = rmse(Y_gen_valid_pred, Y_gen_valid)
+valid_gen_mae = mae(Y_gen_valid_pred, Y_gen_valid)
+valid_gen_r2 = cor(Y_gen_valid_pred, Y_gen_valid)
+
+cat("\nvalidation RMSE is", valid_gen_rmse, "\n")
+cat("validation MAE is", valid_gen_mae, "\n")
+cat("validation R2 is", valid_gen_r2, "\n")
+```
+
+
+## Random Forest model
+
+```{r}
+library(ranger)
+#-- select the training features and target as a matrix and a vector 
+X_gen_train = df_gen_train %>%
+  select(-Gen_RPM_Avg, -Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_gen_train = df_gen_train %>% 
+  pull(Gen_RPM_Avg)
+
+#-- select the testing features and target as a matrix and a vector 
+X_gen_valid = df_gen_valid %>%
+  select(-Gen_RPM_Avg, - Datetime, -Turbine_ID) %>%
+  as.matrix()
+
+Y_gen_valid = df_gen_valid %>%
+  pull(Gen_RPM_Avg)
+
+#-- train Random forest model
+
+df_ranger_train <-data.frame(X_gen_train,Y_gen_train)
+
+gen_ranger<-ranger(formula = Y_gen_train~.,
+            data = df_ranger_train,
+            num.trees = 500,
+            verbose = FALSE)
+
+```
+
+```{r}
+#-- get train prediction and evaluation metrics
+Y_gen_train_pred = predict(gen_ranger, data = df_ranger_train)$predictions
+train_gen_rmse = rmse(Y_gen_train_pred, Y_gen_train)
+train_gen_mae = mae(Y_gen_train_pred, Y_gen_train)
+train_gen_r2 = cor(Y_gen_train_pred, Y_gen_train)^2
+
+cat("train RMSE is", train_gen_rmse, "\n")
+cat("train MAE is", train_gen_mae, "\n")
+cat("train R2 is", train_gen_r2, "\n")
+
+df_ranger_valid<-data.frame(X_gen_valid,Y_gen_valid)
+
+#-- get test predictions and evaluation metrics
+Y_gen_valid_pred = predict(gen_ranger, data = df_ranger_valid)$predictions
+valid_gen_rmse = rmse(Y_gen_valid_pred, Y_gen_valid)
+valid_gen_mae = mae(Y_gen_valid_pred, Y_gen_valid)
+valid_gen_r2 = cor(Y_gen_valid_pred, Y_gen_valid)
+
+cat("\nvalidation RMSE is", valid_gen_rmse, "\n")
+cat("validation MAE is", valid_gen_mae, "\n")
+cat("validation R2 is", valid_gen_r2, "\n")
+```
+
+
+## XGBOOST Model
+
 We train our xgboost model :
 
 ```{r}
